@@ -1,0 +1,39 @@
+# ============================================================================
+# 不进仓库的东西（详见 REPRODUCE.md §7）
+# ⚠ .gitignore 不支持"行内注释"：# 必须单独成行，否则整行会被当成模式
+# ============================================================================
+
+# ---- 与本项目无关 / 体积过大 / 含隐私 ----
+lession/
+browser-profile/
+.audio-venv/
+_shots/
+_refs/
+_refs_q/
+__pycache__/
+*.pyc
+
+# ---- 运行时产物（本机生成，不该带进仓库）----
+_watch.log
+_music.json
+_spectrum.json
+_lyrics_zh.json
+_wallpapers.json
+_taskbar.hidden
+no-kill
+_wechat.json
+_wechat_reply_in.json
+_wechat_reply_out.json
+
+# ---- 同人图素材：仅本地自用，仓库不含（见 REPRODUCE.md §4）
+#      注意 web/assets/models/（模型品牌标）要保留，所以只按扩展名忽略图片
+web/assets/*.png
+web/assets/*.jpg
+web/assets/*.jpeg
+web/assets/*.webp
+
+# ---- 编辑器 / 系统杂项 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

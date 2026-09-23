@@ -1,0 +1,26 @@
+{
+  "deepseek": {
+    "file": "deepseek.svg",
+    "source": "https://models.dev/logos/deepseek.svg",
+    "bytes": 3937,
+    "fill": "#4D6BFE"
+  },
+  "xiaomi": {
+    "file": "xiaomi.svg",
+    "source": "https://cdn.simpleicons.org/xiaomi",
+    "bytes": 918,
+    "fill": "自带"
+  },
+  "nvidia": {
+    "file": "nvidia.svg",
+    "source": "https://cdn.simpleicons.org/nvidia",
+    "bytes": 896,
+    "fill": "自带"
+  },
+  "antgroup": {
+    "file": "antgroup.svg",
+    "source": "https://unpkg.com/@lobehub/icons-static-svg/icons/antgroup-color.svg",
+    "bytes": 2475,
+    "fill": "#1677FF"
+  }
+}
