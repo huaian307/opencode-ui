@@ -1,7 +1,8 @@
 # REPRODUCE.md — 从零复现 opencode-ui
 
 > 这份文档的目标：**换一台 Windows 机器，照着做就能把本项目跑起来**，并且知道每个功能依赖什么、怎么验证。
-> 阅读顺序建议：先本文件 → 再看 [`README.md`](README.md)（日常使用）→ 开发/改代码看 [`AGENTS.md`](AGENTS.md)。
+> 阅读顺序建议：先本文件 → 再看 [`README.md`](README.md)（日常使用）。
+> （开发笔记 `AGENTS.md` / `PROGRESS.md` 含本机路径与进程号等，**不随仓库发布**，只保留在本地。）
 > 本文件最后更新：2026-09-23（前端 `ui 260923h`）
 
 ---
@@ -39,7 +40,7 @@ watch.py（守护进程，占 8788 单实例锁）
 | 项 | 要求 | 说明 |
 | --- | --- | --- |
 | 操作系统 | Windows 10/11 | 大量用到 Win32 / Core Audio / UI Automation / PowerShell |
-| Python | **3.12，仅标准库** | 本项目**零第三方依赖**；示例路径 `D:\Python312\python.exe`（无窗口用 `pythonw.exe`） |
+| Python | **3.12，仅标准库** | 本项目**零第三方依赖**；`python`（控制台）与 `pythonw`（无窗口）需要在 **PATH** 上 |
 | Node / npm | **不需要** | 前端是原生 JS，**没有构建步骤** |
 | 浏览器 | Microsoft Edge（或 Chrome） | 用 `--app=` 独立窗口；代码里按顺序找 Edge/Chrome 的常见安装路径 |
 | OpenCode | **官方桌面版**（已在运行过至少一次） | 需要它生成 `%USERPROFILE%\.local\state\opencode\service.json` |
@@ -91,7 +92,7 @@ foreach ($p in 8788,8787) {
        Select-Object -First 1 -ExpandProperty OwningProcess
   if ($q) { Stop-Process -Id $q -Force }
 }
-Start-Process D:\Python312\pythonw.exe -ArgumentList "$((Get-Location).Path)\watch.py" -WindowStyle Hidden
+Start-Process pythonw -ArgumentList "$((Get-Location).Path)\watch.py" -WindowStyle Hidden
 ```
 
 ---
@@ -117,7 +118,7 @@ Start-Process D:\Python312\pythonw.exe -ArgumentList "$((Get-Location).Path)\wat
 
 ```bat
 :: 用一个独立环境，别污染系统 Python
-D:\Python312\python.exe -m venv .audio-venv
+python -m venv .audio-venv
 .audio-venv\Scripts\python.exe -m pip install soundcard numpy
 :: 然后让 server.py 重新拉起采集器（杀掉落单的 spectrum.py 进程即可，keeper 会重拉）
 ```
@@ -199,26 +200,20 @@ del no-kill              :: 测完删掉
 ```
 opencode-ui/
 ├── server.py / watch.py / taskbar.py   ← 后端与守护进程（纯标准库）
-├── start.bat / stop.bat / launch.vbs   ← 启动/停止/无窗口拉起
+├── start.bat / stop.bat / launch.vbs   ← 启动 / 停止 / 无窗口拉起
 ├── install-startup.ps1 / uninstall-startup.ps1
 ├── web/                                 ← 前端（index.html / style.css / app.js）
-│   ├── assets/                          ← ⚠ 同人图，仓库不含；需自备（见 §4）
-│   │   └── models/                      ← 模型品牌标（可下载；含 sources.json）
-│   ├── refs.html / refs_q.html          ← 参考图候选画廊（可选）
+│   └── assets/models/                   ← 模型品牌标（可用 tools/fetch_model_icons.py 重新下载）
 ├── tools/                               ← 验证与采集工具（见 §5）
-├── AGENTS.md / PROGRESS.md / README.md / REPRODUCE.md
-├── _wallpapers.json                     ← 你选的动态壁纸（运行时生成）
-├── _lyrics_zh.json                      ← 歌词翻译缓存（运行时生成）
-├── _music.json / _spectrum.json         ← SMTC / 频谱采集产物（运行时生成）
-├── _taskbar.hidden                      ← "任务栏是我们藏的"标记（运行时生成）
-└── _watch.log                           ← 守护进程日志（运行时生成）
+├── README.md / REPRODUCE.md / .gitignore
+└── 运行时生成（不入库）：_wallpapers.json · _lyrics_zh.json · _music.json
+    · _spectrum.json · _taskbar.hidden · _watch.log
 
-＜以下内容不进仓库＞
-├── lession/            ← 与本项目无关的个人课程项目（600+ MB）
-├── browser-profile/    ← 面板窗口的浏览器 profile（含会话/缓存，200+ MB）
-├── .audio-venv/        ← 频谱采集的隔离环境（可按 §3 重建，60+ MB）
-├── _shots/             ← 诊断截图
-└── _refs/ _refs_q/     ← 参考图原图（同人作品，仅本地自用）
+＜以下内容不在仓库里＞
+├── AGENTS.md / PROGRESS.md   ← 开发笔记（含本机路径、进程号、开发日志）
+├── web/refs*.html            ← 当时的参考图筛选页
+├── web/assets/*.jpg|png      ← 界面用同人图（版权原因，需自备；见 §4）
+└── 与本项目无关的个人目录 · 浏览器 profile · .audio-venv · 诊断截图 · 参考图原图
 ```
 
 ---

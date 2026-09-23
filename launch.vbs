@@ -7,10 +7,8 @@ Set sh  = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 base = fso.GetParentFolderName(WScript.ScriptFullName)
-pyw  = "D:\Python312\pythonw.exe"
-If Not fso.FileExists(pyw) Then
-    pyw = "pythonw.exe"          ' 退回 PATH
-End If
+' 依赖 PATH；若 Python 没加入 PATH，把 pyw 改成你的 pythonw 全路径（例如 C:\Python312\pythonw.exe）
+pyw  = "pythonw.exe"
 
 sh.CurrentDirectory = base
 cmd = """" & pyw & """ """ & base & "\watch.py"""

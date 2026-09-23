@@ -9,7 +9,7 @@ rem 2) 干掉占用 8788（守护进程锁）和 8787（面板服务）的进程
 powershell -NoProfile -Command "foreach ($port in 8788,8787) { $p = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($p) { Write-Host ('  . stop port ' + $port + ' owner PID ' + $p); Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } }"
 
 rem 3) 兜底：把任务栏恢复常驻可见（守护被强制结束时跑不到它的退出钩子）
-if exist "D:\Python312\python.exe" "D:\Python312\python.exe" "%~dp0taskbar.py" restore
+python "%~dp0taskbar.py" restore 2>nul
 
 echo 完成。（OpenCode 本体不受影响；下次它启动时守护进程会重新拉起）
 pause

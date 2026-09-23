@@ -2,10 +2,9 @@
 
 一个**自建的 OpenCode 界面**：不修改官方桌面版，独立运行，外观完全自控。
 
-> 📄 **接手/新对话请看**：
-> [`AGENTS.md`](AGENTS.md) —— 项目约定、环境约束、后端 API 事实、踩坑清单（**会被 OpenCode 自动加载**）
-> [`PROGRESS.md`](PROGRESS.md) —— 详细进度、功能清单、历史与路线图
-> [`REPRODUCE.md`](REPRODUCE.md) —— **从零复现**：环境要求、跑起来的步骤、各功能依赖、自检清单
+> 📄 **想从零跑起来**：[`REPRODUCE.md`](REPRODUCE.md) —— 环境要求、启动步骤、各功能依赖、自检清单。
+> 🔒 **开发笔记（`AGENTS.md` / `PROGRESS.md`）与参考图筛选页不随本仓库发布**（它们含本机路径、进程号等），
+> 只保留在本地。
 
 ## 目录
 
@@ -18,17 +17,15 @@ opencode-ui/
 ├── stop.bat                停止面板（窗口 + 服务 + 守护进程，不动 OpenCode）
 ├── install-startup.ps1     安装开机自启
 ├── uninstall-startup.ps1   取消开机自启
-├── browser-profile/        面板窗口专属浏览器 profile（244 MB）
+├── browser-profile/        面板窗口专属浏览器 profile（体积会长，可清纯缓存）
 │                           · 纯缓存可安全清空（主题/侧栏状态/名字存在 Local Storage，不受影响）
 │                           · ⚠ 别用"关掉窗口"的方式清 —— 关窗会触发联动、把 OpenCode 一起关掉
-├── _watch.log              守护进程日志
+├── _watch.log              守护进程日志（运行时生成，不入库）
 └── web/
     ├── index.html          页面骨架
     ├── style.css           全部主题变量集中在 :root
     ├── app.js              前端逻辑（原生 JS，无构建步骤）
-    ├── assets/             同人图素材（仅本地自用）
-    ├── refs.html           第一批参考图候选
-    └── refs_q.html         Q 版参考图候选
+    └── assets/             界面素材（同人图**不入库**，需自备；models/ 是模型品牌标）
 ```
 
 ## 运行
@@ -127,6 +124,6 @@ del no-kill              :: 恢复联动
 
 ## 环境
 
-- Python 3.12（`D:\Python312\python.exe`），**仅标准库，无需安装依赖**
+- Python 3.12（`python` / `pythonw` 需在 **PATH** 上），**仅标准库，无需安装依赖**
 - 不需要 Node / npm
 - 调试代理：设 `OPENCODE_UI_VERBOSE=1` 打印访问日志
