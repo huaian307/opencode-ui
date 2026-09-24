@@ -61,6 +61,11 @@ def _taskbar_hwnd():
     return hwnd
 
 
+def is_marked() -> bool:
+    """标记文件存在 = 任务栏是「我们」藏起来的（只读）。"""
+    return os.path.exists(MARKER)
+
+
 def get_hidden() -> bool:
     """当前任务栏是否处于自动隐藏（只读）。"""
     abd = APPBARDATA()

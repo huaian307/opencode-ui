@@ -102,6 +102,9 @@ LYRICS_TTL = 6 * 3600
 TRANSLATE_URL = "https://aidemo.youdao.com/trans"
 LYRICS_ZH_FILE = os.path.join(STATE_DIR, "_lyrics_zh.json")
 LYRICS_ZH_TTL = 7 * 24 * 3600
+
+# 面板设置：是否允许守护进程在面板打开时隐藏任务栏（false = 一直不隐藏）
+TASKBAR_PREF_FILE = os.path.join(STATE_DIR, "_taskbar_enabled.json")
 _ZH_CACHE = None
 
 NO_WINDOW = 0x08000000
@@ -385,6 +388,28 @@ def _attach_translation(out: dict, mid: str, official: str) -> None:
         if i < len(zh) and (zh[i] or "").strip():
             l["zh"] = zh[i].strip()
     out["translated"] = any(l.get("zh") for l in lines)
+
+
+def read_taskbar_pref() -> bool:
+    """面板打开时是否隐藏任务栏；默认开。"""
+    try:
+        with open(TASKBAR_PREF_FILE, "r", encoding="utf-8") as fh:
+            return bool(json.load(fh).get("enabled", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def write_taskbar_pref(enabled: bool) -> bool:
+    """落盘任务栏开关，供守护进程在 /alive 里读取。"""
+    enabled = bool(enabled)
+    try:
+        tmp = TASKBAR_PREF_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"enabled": enabled}, fh, ensure_ascii=False)
+        os.replace(tmp, TASKBAR_PREF_FILE)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _read_music_file() -> dict:
@@ -943,6 +968,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._bye()
             elif path == "/alive":
                 self._alive()
+            elif path == "/panel/taskbar":
+                self._panel_taskbar(method)
             elif path == "/qq/state":
                 self._qq_state()
             elif path == "/qq/control":
@@ -1019,7 +1046,21 @@ class Handler(BaseHTTPRequestHandler):
             "age_seconds": round(age, 1) if age is not None else None,
             "closed": bool(closed),
             "beats": LAST_BEAT["count"],
+            "taskbar": read_taskbar_pref(),   # 守护进程据此决定要不要隐藏任务栏
         })
+
+    def _panel_taskbar(self, method: str):
+        """面板设置：任务栏是否在面板打开时自动隐藏。"""
+        if method == "GET":
+            self._send_json(200, {"enabled": read_taskbar_pref()})
+            return
+        if method != "POST":
+            self._send_json(405, {"error": "GET or POST only"})
+            return
+        body = self._read_json_body() or {}
+        enabled = bool(body.get("enabled", True))
+        ok = write_taskbar_pref(enabled)
+        self._send_json(200 if ok else 500, {"ok": ok, "enabled": enabled})
 
     # ---------- QQ音乐 ----------
 

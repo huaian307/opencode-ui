@@ -1682,7 +1682,10 @@ let liveApply = null;           // initLiveBg 里赋值：设置一变就立刻�
  * ⚠ SET 必须在 initLiveBg 之前声明（sync 里会读 SET.live），而 boot() 在文件末尾才跑，所以没问题。 */
 
 const SET_KEY = "opencode-ui.settings";
-const SET_DEFAULT = { dimHiru: 100, dimYoru: 80, blur: 18, rate: 80, live: true, petals: true, zh: true };
+const SET_DEFAULT = {
+  dimHiru: 100, dimYoru: 80, blur: 18, rate: 80,
+  live: true, taskbar: true, petals: true, zh: true,
+};
 const SET = Object.assign({}, SET_DEFAULT);
 
 function loadSettings() {
@@ -1693,7 +1696,21 @@ function saveSettings() {
   try { localStorage.setItem(SET_KEY, JSON.stringify(SET)); } catch { /* 隐私模式 */ }
 }
 
-/** 把设置写进页面：亮度变量 / 播放速度 / 落樱 / 动态壁纸开关 */
+// 任务栏开关要告诉守护进程（它每轮读 /alive）；相同值不重复发。
+let taskbarPrefSent = null;
+function syncTaskbarPref() {
+  const enabled = !!SET.taskbar;
+  if (taskbarPrefSent === enabled) return;
+  taskbarPrefSent = enabled;
+  fetch("/panel/taskbar", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+    cache: "no-store",
+  }).catch(() => { taskbarPrefSent = null; });   // 失败就允许下次重试
+}
+
+/** 把设置写进页面：亮度变量 / 播放速度 / 落樱 / 动态壁纸 / 任务栏开关 */
 function applySettings() {
   const root = document.documentElement;
   root.style.setProperty("--bg-dim-hiru", (SET.dimHiru / 100).toFixed(2));
@@ -1704,6 +1721,7 @@ function applySettings() {
   document.body.classList.toggle("no-petals", !SET.petals);
   document.body.classList.toggle("no-lyrics-zh", !SET.zh);   // 歌词翻译：关掉就不显示小字译文
   if (liveApply) liveApply();
+  syncTaskbarPref();                                         // 通知守护进程：任务栏是否隐藏
 }
 
 /** 改一项设置：落盘 → 生效 → 刷新设置面板 */
@@ -1725,7 +1743,8 @@ function renderSettings() {
   put("cfg-dim-yoru", SET.dimYoru, SET.dimYoru + "%");
   put("cfg-blur", SET.blur, SET.blur + "px");
   put("cfg-rate", SET.rate, (SET.rate / 100).toFixed(2) + "×");
-  [["cfg-live", SET.live], ["cfg-petals", SET.petals], ["cfg-zh", SET.zh]].forEach(([id, on]) => {
+  [["cfg-live", SET.live], ["cfg-taskbar", SET.taskbar],
+   ["cfg-petals", SET.petals], ["cfg-zh", SET.zh]].forEach(([id, on]) => {
     const b = $(id);
     if (!b) return;
     b.classList.toggle("on", !!on);
@@ -1746,6 +1765,7 @@ function initSettings() {
   $("cfg-blur").addEventListener("input", (e) => setSetting("blur", Number(e.target.value)));
   $("cfg-rate").addEventListener("input", (e) => setSetting("rate", Number(e.target.value)));
   $("cfg-live").addEventListener("click", () => setSetting("live", !SET.live));
+  $("cfg-taskbar").addEventListener("click", () => setSetting("taskbar", !SET.taskbar));
   $("cfg-petals").addEventListener("click", () => setSetting("petals", !SET.petals));
   $("cfg-zh").addEventListener("click", () => {
     setSetting("zh", !SET.zh);

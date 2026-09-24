@@ -102,20 +102,29 @@ def ps(command: str) -> str:
 
 
 # ---------------- 任务栏联动 ----------------
-# 面板开 → 任务栏自动隐藏（鼠标贴底边才浮现）；面板关 → 常驻可见。
-# 只在"开关事件"上动作；"是不是我们藏的"由 taskbar.py 的标记文件记账，
+# 面板开着且未最小化、并且设置开关打开 → 任务栏自动隐藏（鼠标贴底边才浮现）；
+# 面板最小化 / 设置开关关闭 / 面板关闭 → 恢复常驻可见。
+# "是不是我们藏的"由 taskbar.py 的标记文件记账，
 # 所以守护重启/被强杀都不会覆盖用户自己的任务栏设置。
 
-def taskbar_hidden(hidden: bool) -> None:
+def taskbar_sync(hidden: bool) -> None:
+    """把任务栏同步到目标状态，但只在状态真的变化时动作。
+
+    - 要隐藏：仅当当前不是我们藏的时候才写标记 + ABM_SETSTATE；
+    - 要显示：仅当标记存在（= 我们藏过）才恢复，**不覆盖用户自己的任务栏设置**。
+    """
     if _taskbar is None:
         return
     try:
-        if _taskbar.set_hidden(hidden):
-            log(f"任务栏 → {'自动隐藏' if hidden else '常驻可见'}")
-        else:
-            log("任务栏联动：找不到任务栏窗口")
+        marked = _taskbar.is_marked()
+        if hidden and not marked:
+            if _taskbar.set_hidden(True):
+                log("任务栏 → 自动隐藏")
+        elif not hidden and marked:
+            if _taskbar.set_hidden(False):
+                log("任务栏 → 常驻可见")
     except Exception as exc:  # noqa: BLE001
-        log(f"任务栏联动失败: {exc}")
+        log(f"任务栏同步失败: {exc}")
 
 
 def restore_taskbar_if_marked() -> None:
@@ -154,13 +163,19 @@ def ensure_server() -> bool:
     return False
 
 
-def panel_alive() -> bool:
-    """页面心跳还在吗（= 面板窗口还开着）。"""
+def panel_status() -> dict:
+    """面板状态：心跳 + 用户的任务栏开关（由 server.py 提供）。"""
     try:
         with urllib.request.urlopen(ALIVE_URL, timeout=3) as r:
-            return bool(json.loads(r.read().decode("utf-8")).get("alive"))
+            data = json.loads(r.read().decode("utf-8"))
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return False
+        return {}
+
+
+def panel_alive() -> bool:
+    """页面心跳还在吗（= 面板窗口还开着）。"""
+    return bool(panel_status().get("alive"))
 
 
 def upstream_ready() -> bool:
@@ -222,6 +237,8 @@ _user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 SW_MINIMIZE = 6
 _user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 _user32.FindWindowW.restype = wintypes.HWND
+_user32.IsIconic.argtypes = [wintypes.HWND]
+_user32.IsIconic.restype = wintypes.BOOL
 
 
 def opencode_pids() -> set[int]:
@@ -270,6 +287,32 @@ def minimize_opencode() -> int:
         _user32.ShowWindow(hwnd, SW_MINIMIZE)
     log(f"已最小化 OpenCode 窗口 {len(found)} 个")
     return len(found)
+
+
+def panel_minimized(pid: int) -> bool:
+    """面板主窗口是否被最小化（只看该 PID 下可见的顶层窗口）。
+
+    最小化时页面心跳可能还在，但用户此刻并不需要"沉浸式面板"，
+    所以任务栏应该恢复可见；恢复窗口后再隐藏。
+    """
+    if not pid:
+        return False
+    state = {"visible": False, "minimized": False}
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def _cb(hwnd, _lparam):
+        wpid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if (wpid.value == pid
+                and _user32.IsWindowVisible(hwnd)
+                and _user32.GetWindowTextLengthW(hwnd) > 0):
+            state["visible"] = True
+            if _user32.IsIconic(hwnd):
+                state["minimized"] = True
+        return True
+
+    _user32.EnumWindows(_cb, 0)
+    return bool(state["visible"] and state["minimized"])
 
 
 # ---------------- 面板窗口 ----------------
@@ -326,12 +369,12 @@ def close_window() -> None:
        "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
 
 
-def open_window():
+def open_window(hide_taskbar: bool = True):
     wait_upstream()                          # ★ 先等后端可用，避免开出连不上的页面
     os.makedirs(PROFILE_DIR, exist_ok=True)
     for exe in BROWSERS:
         if os.path.isfile(exe):
-            taskbar_hidden(True)             # 唤起面板 → 任务栏自动隐藏
+            taskbar_sync(hide_taskbar)       # 开关关掉时这里不会隐藏，只会自愈恢复
             log(f"打开面板窗口: {exe}")
             proc = subprocess.Popen(
                 [exe, f"--app={URL}", f"--user-data-dir={PROFILE_DIR}",
@@ -348,7 +391,7 @@ def open_window():
                 log(f"最小化 OpenCode 失败: {exc}")
             return proc
     log("没找到 Edge/Chrome，退回默认浏览器打开")
-    taskbar_hidden(True)                     # 唤起面板 → 任务栏自动隐藏
+    taskbar_sync(hide_taskbar)               # 开关关掉时这里不会隐藏
     os.startfile(URL)  # noqa: S606
     time.sleep(MINIMIZE_DELAY)
     try:
@@ -382,7 +425,9 @@ def main() -> int:
     ensure_server()
 
     # 判断窗口是否开着：心跳优先；没心跳时用浏览器进程兜底（兼容旧页面/最小化被节流）
-    alive = panel_alive()
+    status = panel_status()
+    alive = bool(status.get("alive"))
+    taskbar_pref = bool(status.get("taskbar", True))   # 设置里"任务栏是否隐藏"
     proc = None                                  # 我们自己拉起的窗口进程句柄
     adopted_pid = 0                              # 采纳的外部窗口：主进程 PID（廉价存活判据）
     if not alive and profile_in_use():
@@ -390,21 +435,21 @@ def main() -> int:
         adopted_pid = panel_main_pid()
         log(f"启动时检测到已有面板窗口（外部打开，主进程 PID={adopted_pid}）")
     opened_at = 0.0
-    log(f"启动时面板窗口: {'开着' if alive else '没开'}")
-    if alive:
-        taskbar_hidden(True)                 # 接管已开着的面板 → 任务栏跟着隐藏
+    log(f"启动时面板窗口: {'开着' if alive else '没开'}（任务栏开关: {taskbar_pref}）")
+    if alive and taskbar_pref:
+        taskbar_sync(True)                   # 接管已开着的面板 → 任务栏跟着隐藏
     else:
-        restore_taskbar_if_marked()          # 上次留下"隐藏"标记而面板已关 → 自愈恢复
+        restore_taskbar_if_marked()          # 开关关掉 / 上次留下"隐藏"标记 → 自愈恢复
 
     running = opencode_running()
 
     if once:
         if not alive:
-            open_window()
+            open_window(hide_taskbar=taskbar_pref)
         return 0
 
     if running and not alive:
-        proc = open_window()
+        proc = open_window(hide_taskbar=taskbar_pref)
         opened_at = time.time()
         alive = True
 
@@ -424,10 +469,12 @@ def main() -> int:
             ensure_server()
 
         # ---- ① 面板窗口还开着吗 ----
+        status = panel_status()
+        taskbar_pref = bool(status.get("taskbar", True))
         if opened_at and now - opened_at < SETTLE_SECONDS:
             fresh = True                         # 刚开窗，等页面加载
         else:
-            fresh = panel_alive()
+            fresh = bool(status.get("alive"))
             if not fresh and proc is not None and proc.poll() is None:
                 fresh = True                     # 我们拉起的浏览器进程还活着（最准）
             elif not fresh and proc is None and adopted_pid and pid_alive(adopted_pid):
@@ -435,9 +482,12 @@ def main() -> int:
         if proc is not None and proc.poll() is not None:
             proc = None                          # 句柄已失效
 
-        # ---- ②′ 由关 → 开（也可能是外部手动打开的）→ 任务栏跟着隐藏 ----
-        if fresh and not was_open:
-            taskbar_hidden(True)
+        # ---- ①′ 任务栏联动 ----
+        # 目标：设置允许 + 面板还在 + 面板未最小化 时才隐藏。
+        # 最小化、设置关掉、面板关掉，都会走 taskbar_sync(False) 恢复（只恢复"我们藏过的"）。
+        panel_pid = proc.pid if proc is not None else adopted_pid
+        minimized = panel_minimized(panel_pid) if (fresh and panel_pid) else False
+        taskbar_sync(bool(taskbar_pref and fresh and not minimized))
 
         # ---- ② 由开 → 关：进入反悔期 ----
         if was_open and not fresh:
@@ -453,7 +503,7 @@ def main() -> int:
                 log("窗口又开回来了 → 取消关闭")
                 closed_at = None
             elif time.time() - closed_at >= GRACE_SECONDS:
-                taskbar_hidden(False)            # 面板确实关了 → 任务栏恢复常驻可见
+                taskbar_sync(False)              # 面板确实关了 → 恢复（只恢复我们藏过的）
                 if KILL_OPENCODE:
                     kill_opencode()
                 closed_at = None
@@ -472,7 +522,7 @@ def main() -> int:
         # 反悔期被新窗口的心跳取消，kill 永远执行不到 —— 必须等反悔期走完。
         if running and not fresh and not skip_open and closed_at is None:
             log("检测到 OpenCode 在运行且窗口未开 → 打开面板窗口")
-            proc = open_window()
+            proc = open_window(hide_taskbar=taskbar_pref)
             opened_at = time.time()
             fresh = True
 

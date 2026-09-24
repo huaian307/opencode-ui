@@ -24,6 +24,8 @@ runtime/state/_lyrics_zh.json
 runtime/state/_music_cookie.json
 runtime/state/_wallpapers.json
 runtime/state/_taskbar.hidden
+runtime/state/_taskbar_enabled.json
+runtime/state/_taskbar_enabled.json.tmp
 _wechat.json
 _wechat_reply_in.json
 _wechat_reply_out.json
