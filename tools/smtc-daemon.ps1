@@ -12,11 +12,17 @@ param(
 
 if ([string]::IsNullOrWhiteSpace($OutFile)) {
     $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
-    $OutFile = Join-Path $root "_music.json"
+    $stateDir = Join-Path $root "runtime\state"
+    New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+    $OutFile = Join-Path $stateDir "_music.json"
+}
+$parent = Split-Path -Parent $OutFile
+if (-not [string]::IsNullOrWhiteSpace($parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
-# 单实例：服务重启不会带走已经脱离的采集进程，所以靠命名互斥量避免堆一堆。
+# Single-instance guard: a service restart can leave an old collector behind.
 $mutex = New-Object System.Threading.Mutex($false, 'opencode-ui-smtc-daemon')
 if (-not $mutex.WaitOne(0)) {
     exit 0

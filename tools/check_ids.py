@@ -14,7 +14,8 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WEB = os.path.join(os.path.dirname(HERE), "web")
+ROOT = os.path.dirname(HERE)
+WEB = os.path.join(ROOT, "frontend")
 
 
 def ids_declared(text: str) -> set:

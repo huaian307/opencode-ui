@@ -4,7 +4,7 @@ r"""真·看界面：用 Edge 无头模式渲染面板页面，把 DOM 实际渲
 为什么需要它：这个项目没有 node，也没有连桌面浏览器，所以「界面到底渲染成什么样」
 以前只能靠用户口述。其实 Edge 自己就能无头渲染 —— 这个工具把那条路固定下来：
 
-    1. 由 web/index.html 生成一个探针页 web/_probe.html（结构一模一样）
+    1. 由 frontend/index.html 生成一个探针页 frontend/_probe.html（结构一模一样）
     2. 探针页里拦掉 /heartbeat、/bye、SSE、/qq/*、/form、/permission
        —— 这样它绝不会惊动守护进程（不会触发「关窗 → 关 OpenCode」），
           也避免长连接把 --virtual-time-budget 卡死
@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WEB = os.path.join(HERE, "web")
+WEB = os.path.join(HERE, "frontend")
 PROBE = os.path.join(WEB, "_probe.html")
 URL = "http://127.0.0.1:8787/_probe.html"
 

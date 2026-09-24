@@ -1,0 +1,441 @@
+# -*- coding: utf-8 -*-
+"""本地音乐服务（网易云 + QQ音乐 · 均为非官方接口）。
+
+跑在隔离环境 `runtime/venvs/music` 里，由 `backend/server.py` 保活；只监听 127.0.0.1。
+前端 → server.py 代理(/music/*) → 本服务。统一带 `p=` 选平台（默认 netease）：
+
+    GET  /status                         -> {ok, providers:{netease:{loggedIn,cookieTail}, qq:{...}}}
+    GET  /search?p=&q=&limit=&offset=    -> {ok, songs:[{id,name,artists,album,cover,duration}]}
+    GET  /url?p=&id=&level=              -> {ok, url, ...}
+    GET  /stream?p=&id=&level=           -> 音频流（支持 Range）
+    POST /cookie  {provider, cookie}     -> 保存（cookie 为空则清除）
+
+- netease：PyPI `NeteaseCloudMusic`（V8 算 eapi 签名，HTTP 由 Python 发）。
+- qq：算法移植自 Mineradio（`server.js`），**纯标准库**（hashlib/base64/urllib），不要 Node。
+
+⚠ 仅供个人自用；接口非官方，随时可能失效。
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import random
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+STATE_DIR = os.path.join(ROOT, "runtime", "state")
+os.makedirs(STATE_DIR, exist_ok=True)
+COOKIE_FILE = os.path.join(STATE_DIR, "_music_cookie.json")
+PORT = 8790
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+# SDK 会在「当前工作目录」建一个 diskcache 用的 `cache/`；把它引到隔离环境里，别脏了项目根
+_VENV_DIR = os.path.join(ROOT, "runtime", "venvs", "music")
+if os.path.isdir(_VENV_DIR):
+    os.chdir(_VENV_DIR)
+
+# ---------------- 网易云：旧 V8 的 encodeURIComponent 按 UTF-16 编码，crypto-js 的
+# UTF-8 编码因此出错 → 中文搜索乱码。注入正确的 UTF-8 版覆盖它。 ----------------
+SHIM = r'''
+globalThis.encodeURIComponent = (function () {
+  function h(x) { var s = x.toString(16).toUpperCase(); return s.length < 2 ? '0' + s : s; }
+  return function (str) {
+    str = String(str); var out = '';
+    for (var i = 0; i < str.length; i++) {
+      var c = str.charCodeAt(i);
+      if (c < 0x80) { out += '%' + h(c); }
+      else if (c < 0x800) { out += '%' + h(0xC0 | (c >> 6)) + '%' + h(0x80 | (c & 0x3F)); }
+      else if (c >= 0xD800 && c <= 0xDBFF) {
+        var c2 = str.charCodeAt(++i), cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
+        out += '%' + h(0xF0 | (cp >> 18)) + '%' + h(0x80 | ((cp >> 12) & 0x3F))
+             + '%' + h(0x80 | ((cp >> 6) & 0x3F)) + '%' + h(0x80 | (cp & 0x3F));
+      } else {
+        out += '%' + h(0xE0 | (c >> 12)) + '%' + h(0x80 | ((c >> 6) & 0x3F)) + '%' + h(0x80 | (c & 0x3F));
+      }
+    }
+    return out;
+  };
+})();
+'''
+
+_api = None
+_lock = threading.Lock()
+
+
+def get_api():
+    global _api
+    with _lock:
+        if _api is None:
+            from NeteaseCloudMusic import NeteaseCloudMusicApi
+            a = NeteaseCloudMusicApi()
+            a.ctx.eval(SHIM)
+            _api = a
+        return _api
+
+
+# ---------------- Cookie（按平台分开存）----------------
+
+def read_cookies() -> dict:
+    out = {"netease": "", "qq": ""}
+    try:
+        with open(COOKIE_FILE, "r", encoding="utf-8") as fh:
+            d = json.load(fh) or {}
+        if "netease" in d or "qq" in d:
+            out["netease"] = str(d.get("netease") or "")
+            out["qq"] = str(d.get("qq") or "")
+        else:                                  # 兼容旧的 {cookie: "..."}
+            out["netease"] = str(d.get("cookie") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def write_cookie(provider: str, value: str) -> None:
+    d = read_cookies()
+    d[provider if provider in ("netease", "qq") else "netease"] = value or ""
+    with open(COOKIE_FILE, "w", encoding="utf-8") as fh:
+        json.dump(d, fh, ensure_ascii=False, indent=2)
+
+
+# ---------------- 网易云 ----------------
+
+def ne_search(q: str, limit: int, offset: int) -> list:
+    api = get_api()
+    r = api.request("/cloudsearch", {"keywords": q, "limit": limit, "offset": offset,
+                                     "type": 1, "cookie": read_cookies()["netease"]})
+    songs = (((r or {}).get("data") or {}).get("result") or {}).get("songs") or []
+    out = []
+    for s in songs:
+        al = s.get("al") or {}
+        out.append({"id": s.get("id"), "name": s.get("name"),
+                    "artists": " / ".join(a.get("name", "") for a in (s.get("ar") or [])),
+                    "album": al.get("name", ""), "cover": al.get("picUrl", ""),
+                    "duration": int((s.get("dt") or 0) / 1000)})
+    return out
+
+
+def ne_url(sid: str, level: str) -> dict:
+    api = get_api()
+    r = api.request("/song/url/v1", {"id": sid, "level": level, "cookie": read_cookies()["netease"]})
+    arr = (((r or {}).get("data") or {}).get("data") or [])
+    if not arr:
+        return {"ok": False, "error": "no data"}
+    d = arr[0]
+    return {"ok": bool(d.get("url")), "url": d.get("url"), "br": d.get("br"),
+            "size": d.get("size"), "fee": d.get("fee"), "type": d.get("type"),
+            "error": None if d.get("url") else "该曲目无可用音源（可能需会员）"}
+
+
+def ne_stream_headers() -> dict:
+    return {"User-Agent": UA, "Referer": "https://music.163.com/"}
+
+
+# ---------------- QQ音乐（算法来自 Mineradio server.js，纯标准库）----------------
+
+QQ_UA_AND = "QQMusic 14090508(android 12)"
+QQ_H = {"Referer": "https://y.qq.com/", "User-Agent": UA}
+QQ_COMM = {
+    "ct": "11", "cv": "14090508", "v": "14090508", "tmeAppID": "qqmusic",
+    "phonetype": "EBG-AN10", "os_ver": "12", "OpenUDID": "0", "QIMEI36": "0",
+    "udid": "0", "chid": "0", "aid": "0", "oaid": "0", "taid": "0", "tid": "0",
+    "wid": "0", "uid": "0", "sid": "0", "modeSwitch": "6", "teenMode": "0",
+    "ui_mode": "2", "nettype": "1020",
+}
+
+
+def qq_sign(text: str) -> str:
+    """Mineradio 的 qqSearchSign：sha1 + 查表 + 异或 + base64。"""
+    h = hashlib.sha1(text.encode("utf-8")).hexdigest()
+    at = lambda i: h[i] if i < len(h) else ""    # JS: hash[40] === undefined -> join 当空串
+    p1 = "".join(at(i) for i in (23, 14, 6, 36, 16, 40, 7, 19))
+    p2 = "".join(at(i) for i in (16, 1, 32, 12, 19, 27, 8, 5))
+    scramble = [89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64,
+                242, 133, 143, 161, 121, 179]
+    b = bytes(v ^ int(h[i * 2:i * 2 + 2], 16) for i, v in enumerate(scramble))
+    mid = base64.b64encode(b).decode().translate(str.maketrans("", "", "/+="))
+    return ("zzc" + p1 + mid + p2).lower()
+
+
+def _http_json(url: str, body: bytes | None, headers: dict) -> dict:
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST" if body else "GET")
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _parse_cookie(cookie: str) -> dict:
+    d = {}
+    for part in (cookie or "").split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            d[k.strip()] = v.strip()
+    return d
+
+
+def qq_uin_key() -> tuple:
+    c = _parse_cookie(read_cookies()["qq"])
+    uin = (c.get("uin") or c.get("qqmusic_uin") or c.get("wxuin") or "").lstrip("0")
+    key = c.get("qm_keyst") or c.get("qqmusic_key") or c.get("music_key") or c.get("wxskey") or ""
+    return (uin or "0"), key
+
+
+def qq_search(q: str, limit: int, offset: int) -> list:
+    payload = {"comm": QQ_COMM, "req": {
+        "module": "music.search.SearchCgiService", "method": "DoSearchForQQMusicMobile",
+        "param": {"search_type": 0, "searchid": str(int(time.time() * 1000)) + str(random.randint(10, 99)),
+                  "query": q, "page_num": offset // max(1, limit) + 1, "num_per_page": limit,
+                  "highlight": 0, "nqc_flag": 0, "multi_zhida": 0, "cat": 2, "grp": 1,
+                  "sin": offset, "sem": 0}}}
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = {"User-Agent": QQ_UA_AND, "Content-Type": "application/json",
+               "Content-Length": str(len(body))}
+    ck = read_cookies()["qq"]
+    if ck:
+        headers["Cookie"] = ck
+    js = _http_json("https://u.y.qq.com/cgi-bin/musics.fcg?sign=" + qq_sign(body.decode("utf-8")),
+                    body, headers)
+    data = (js.get("req") or {}).get("data") or {}
+    body_data = data.get("body") or data
+    items = (body_data.get("item_song")
+             or (body_data.get("song") or {}).get("list") or body_data.get("list") or [])
+    out = []
+    for it in items:
+        ti = it.get("track_info") or it.get("songInfo") or it.get("songinfo") or it.get("song") or it
+        al = ti.get("album") or {}
+        mid = ti.get("mid") or (ti.get("file") or {}).get("media_mid") or ""
+        cover = ""
+        if al.get("mid"):
+            cover = "https://y.gtimg.cn/music/photo_new/T002R300x300M000%s.jpg" % al["mid"]
+        out.append({"id": mid, "name": ti.get("name") or "",
+                    "artists": " / ".join((s.get("name") or "") for s in (ti.get("singer") or [])),
+                    "album": al.get("name") or "", "cover": cover,
+                    "duration": int(ti.get("interval") or 0),
+                    "mediaMid": (ti.get("file") or {}).get("media_mid") or ""})
+    return out
+
+
+QQ_QUALITY = [("M800", ".mp3", "320k"), ("F000", ".flac", "无损"),
+              ("M500", ".mp3", "128k"), ("C400", ".m4a", "AAC")]
+
+
+def qq_url(mid: str, media_mid: str = "") -> dict:
+    mid = str(mid or "").strip()
+    if not mid:
+        return {"ok": False, "error": "missing mid"}
+    uin, key = qq_uin_key()
+    ck = read_cookies()["qq"]
+    guid = str(10000000 + random.randint(0, 89999999))
+    ids = [x for x in dict.fromkeys([str(media_mid or "").strip(), mid]) if x]
+    # ⚠ 高音质的文件名常要用 media_mid（≠ songmid）；两种都列，逐个探测谁真能下
+    fns = [p + i + e for p, e, _ in QQ_QUALITY for i in ids]
+    comm = {"uin": uin, "format": "json", "ct": 19 if key else 24, "cv": 0}
+    if key:
+        comm["authst"] = key
+    payload = {"comm": comm, "req_0": {
+        "module": "vkey.GetVkeyServer", "method": "CgiGetVkey",
+        "param": {"guid": guid, "songmid": [mid] * len(fns), "songtype": [0] * len(fns),
+                  "uin": uin, "loginflag": 1, "platform": "20", "filename": fns}}}
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = {"User-Agent": UA, "Content-Type": "application/json",
+               "Content-Length": str(len(body)), **QQ_H}
+    if ck:
+        headers["Cookie"] = ck
+    try:
+        js = _http_json("https://u.y.qq.com/cgi-bin/musicu.fcg", body, headers)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+    d = (js.get("req_0") or {}).get("data") or {}
+    infos = d.get("midurlinfo") or []
+    sip = (d.get("sip") or ["http://aqqmusic.tc.qq.com/"])[0]
+    by_fn = {i.get("filename"): i for i in infos}
+    tried = 0
+    for prefix, ext, label in QQ_QUALITY:                 # 音质优先；每个再用 media_mid / songmid
+        for i in ids:
+            fn = prefix + i + ext
+            info = by_fn.get(fn)
+            if not (info and info.get("purl")):
+                continue
+            tried += 1
+            if tried > 6:
+                break
+            url = sip + info["purl"]
+            if _probe_audio(url):                          # 只有真能取到音频的才算
+                return {"ok": True, "url": url, "filename": fn, "quality": label}
+    last = infos[0] if infos else None
+    if not ck:
+        reason = "未登录 QQ 音乐（点「登录」贴【完整】Cookie：uin=…; qm_keyst=…）"
+    elif last is not None:
+        code = last.get("result") or last.get("code")
+        if str(code) == "104003":
+            reason = "该曲目需要 QQ音乐会员（VIP 曲目）；免费歌曲可正常播放"
+        else:
+            reason = "有 vkey 但音频文件取不到（可能该音质无文件），换一首试试"
+    else:
+        reason = "该曲目无可用音源"
+    return {"ok": False, "error": reason}
+
+
+def qq_stream_headers() -> dict:
+    return {"User-Agent": UA, "Referer": "https://y.qq.com/"}
+
+
+def _probe_audio(url: str) -> bool:
+    """Range 探测：真能拿到音频头才算可用（vkey 会对不存在的文件也返回 purl）。"""
+    try:
+        req = urllib.request.Request(url, headers=qq_stream_headers())
+        req.add_header("Range", "bytes=0-1023")
+        with urllib.request.urlopen(req, timeout=8) as r:
+            st = r.status
+            head = r.read(4)
+        if st not in (200, 206):
+            return False
+        return (head[:3] == b"ID3" or head[:4] == b"fLaC" or head[4:8] == b"ftyp"
+                or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# ---------------- 分发 ----------------
+
+def do_search(provider: str, q: str, limit: int, offset: int) -> list:
+    return qq_search(q, limit, offset) if provider == "qq" else ne_search(q, limit, offset)
+
+
+def do_url(provider: str, sid: str, level: str, media_mid: str = "") -> dict:
+    return qq_url(sid, media_mid) if provider == "qq" else ne_url(sid, level)
+
+
+def stream_headers(provider: str) -> dict:
+    return qq_stream_headers() if provider == "qq" else ne_stream_headers()
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _json(self, code: int, obj: dict):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        p = (q.get("p") or ["netease"])[0]
+        if p not in ("netease", "qq"):
+            p = "netease"
+        try:
+            if u.path == "/status":
+                cks = read_cookies()
+                self._json(200, {"ok": True, "providers": {
+                    "netease": {"loggedIn": bool(cks["netease"]), "cookieTail": cks["netease"][-12:]},
+                    "qq": {"loggedIn": bool(cks["qq"]), "cookieTail": cks["qq"][-12:]}}})
+            elif u.path == "/search":
+                kw = (q.get("q") or [""])[0].strip()
+                if not kw:
+                    self._json(400, {"ok": False, "error": "empty q"})
+                    return
+                self._json(200, {"ok": True, "songs": do_search(
+                    p, kw, int((q.get("limit") or ["20"])[0]), int((q.get("offset") or ["0"])[0]))})
+            elif u.path == "/url":
+                self._json(200, do_url(p, (q.get("id") or [""])[0],
+                                       (q.get("level") or ["standard"])[0],
+                                       (q.get("mid2") or [""])[0]))
+            elif u.path == "/stream":
+                self._stream(p, (q.get("id") or [""])[0],
+                             (q.get("level") or ["standard"])[0], (q.get("mid2") or [""])[0])
+            else:
+                self._json(404, {"ok": False, "error": "not found"})
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            self._json(500, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc),
+                             "trace": traceback.format_exc()[-500:]})
+
+    def do_POST(self):
+        u = urllib.parse.urlsplit(self.path)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n).decode("utf-8") or "{}") if n else {}
+            if u.path == "/cookie":
+                provider = str(body.get("provider") or "netease")
+                ck = str(body.get("cookie") or "")
+                write_cookie(provider, ck)
+                c = _parse_cookie(ck)
+                missing = []
+                if provider == "qq":
+                    if not (c.get("uin") or c.get("qqmusic_uin") or c.get("wxuin")):
+                        missing.append("uin")
+                    if not (c.get("qm_keyst") or c.get("qqmusic_key") or c.get("music_key") or c.get("wxskey")):
+                        missing.append("qm_keyst")
+                elif "MUSIC_U" not in ck:
+                    missing.append("MUSIC_U")
+                self._json(200, {"ok": True, "provider": provider, "keys": sorted(c.keys()),
+                                 "missing": missing,
+                                 "loggedIn": bool(read_cookies().get(provider))})
+            else:
+                self._json(404, {"ok": False, "error": "not found"})
+        except Exception as exc:  # noqa: BLE001
+            self._json(500, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)})
+
+    def _stream(self, provider: str, sid: str, level: str, media_mid: str = ""):
+        info = do_url(provider, sid, level, media_mid)
+        url = info.get("url")
+        if not url:
+            self._json(404, {"ok": False, "error": info.get("error") or "no url"})
+            return
+        headers = stream_headers(provider)
+        rng = self.headers.get("Range")
+        if rng:
+            headers["Range"] = rng
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            self._json(502, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)})
+            return
+        self.send_response(resp.status)
+        self.send_header("Content-Type", resp.headers.get("Content-Type", "audio/mpeg"))
+        for h in ("Content-Length", "Content-Range", "Accept-Ranges"):
+            if resp.headers.get(h):
+                self.send_header(h, resp.headers[h])
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            resp.close()
+
+
+def main() -> int:
+    port = PORT
+    if "--port" in sys.argv:
+        port = int(sys.argv[sys.argv.index("--port") + 1])
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print("music_service on http://127.0.0.1:%d" % port)
+    srv.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

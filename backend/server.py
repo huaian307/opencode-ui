@@ -3,14 +3,14 @@
 r"""opencode-ui —— 零依赖本地代理 + 静态服务器
 
 它做三件事：
-  1. 托管 web/ 下的静态前端；
+  1. 托管 frontend/ 下的静态前端；
   2. 把 /api/* 反向代理到本机 OpenCode 后台服务，自动附加 HTTP Basic 鉴权
      （浏览器无法直接带鉴权跨源访问，这一步把鉴权和同源问题一次性解决）；
   3. 以流式方式透传响应，保证 /api/event (SSE) 的实时性，不缓冲。
 
 依赖：仅 Python 标准库。运行：
-    python server.py                 # 默认 http://127.0.0.1:8787
-    python server.py --port 9000
+    python backend/server.py                 # 默认 http://127.0.0.1:8787
+    python backend/server.py --port 9000
 """
 
 from __future__ import annotations
@@ -35,10 +35,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs, quote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = os.path.join(HERE, "web")
-REFS_DIR = os.path.join(HERE, "_refs")          # 参考图（本地预览用，非应用资源）
-EXTRA_ROOTS = {"/refs/": REFS_DIR, "/refsq/": os.path.join(HERE, "_refs_q")}
+ROOT = os.path.dirname(HERE)
+FRONTEND_DIR = os.path.join(ROOT, "frontend")
+TOOLS_DIR = os.path.join(ROOT, "tools")
+RESOURCES_DIR = os.path.join(ROOT, "resources")
+RUNTIME_DIR = os.path.join(ROOT, "runtime")
+STATE_DIR = os.path.join(RUNTIME_DIR, "state")
+LOGS_DIR = os.path.join(RUNTIME_DIR, "logs")
+VENVS_DIR = os.path.join(RUNTIME_DIR, "venvs")
+REFS_DIR = os.path.join(RESOURCES_DIR, "references", "primary")
+EXTRA_ROOTS = {
+    "/refs/": REFS_DIR,
+    "/refsq/": os.path.join(RESOURCES_DIR, "references", "q"),
+}
 SERVICE_STATE = os.path.join(os.path.expanduser("~"), ".local", "state", "opencode", "service.json")
+
+for _directory in (RUNTIME_DIR, STATE_DIR, LOGS_DIR, VENVS_DIR):
+    os.makedirs(_directory, exist_ok=True)
 
 # 逐跳首部，不能端到端转发
 HOP_BY_HOP = {
@@ -61,14 +74,20 @@ BEAT_TIMEOUT = 8.0          # 心跳断档多久算"页面没了"（正常 4 秒
 # 控制动作由 tools/smtc-control.ps1（一次性调用）执行。
 # 歌词走 QQ音乐网页接口（搜索 → 歌词），只用于本地显示。
 
-MUSIC_FILE = os.path.join(HERE, "_music.json")
-SPECTRUM_FILE = os.path.join(HERE, "_spectrum.json")
-AUDIO_PY = os.path.join(HERE, ".audio-venv", "Scripts", "python.exe")
+MUSIC_FILE = os.path.join(STATE_DIR, "_music.json")
+SPECTRUM_FILE = os.path.join(STATE_DIR, "_spectrum.json")
+AUDIO_PY = os.path.join(VENVS_DIR, "audio", "Scripts", "python.exe")
 _spectrum_proc = None
 _spectrum_lock = threading.Lock()
 MUSIC = {"state": {}, "updated": 0.0}
 _music_proc = None
 _music_lock = threading.Lock()
+
+# 网易云音乐服务（跑在隔离环境 runtime/venvs/music；非官方接口，仅供个人自用）
+MUSIC_SVC_PY = os.path.join(VENVS_DIR, "music", "Scripts", "python.exe")
+MUSIC_SVC_PORT = 8790
+_musicsvc_proc = None
+_musicsvc_lock = threading.Lock()
 
 QQ_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
          "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
@@ -81,7 +100,7 @@ LYRICS_TTL = 6 * 3600
 # → "如果只是一场梦该有多好"）。结果落盘缓存 7 天，避免每次切歌都重翻。
 # ⚠ 不要用 fanyi.youdao.com 老端点（返回 HTML）、Google gtx（被墙）、Bing ttranslatev3（要 token）。
 TRANSLATE_URL = "https://aidemo.youdao.com/trans"
-LYRICS_ZH_FILE = os.path.join(HERE, "_lyrics_zh.json")
+LYRICS_ZH_FILE = os.path.join(STATE_DIR, "_lyrics_zh.json")
 LYRICS_ZH_TTL = 7 * 24 * 3600
 _ZH_CACHE = None
 
@@ -491,7 +510,7 @@ def start_music_daemon(force: bool = False) -> None:
     with _music_lock:
         if _music_proc is not None and _music_proc.poll() is None:
             return
-        script = os.path.join(HERE, "tools", "smtc-daemon.ps1")
+        script = os.path.join(TOOLS_DIR, "smtc-daemon.ps1")
         if not os.path.isfile(script):
             return
         try:
@@ -506,10 +525,10 @@ def start_music_daemon(force: bool = False) -> None:
 
 
 def ui_version() -> str:
-    """读 web/index.html 里的 ?v=，作为"服务端现在的前端版本号"。
+    """读 frontend/index.html 里的 ?v=，作为"服务端现在的前端版本号"。
     前端拿它和自己加载到的 ?v= 比对，不一致就自动刷新（避免面板一直跑旧代码）。"""
     try:
-        with open(os.path.join(HERE, "web", "index.html"), "r", encoding="utf-8") as fh:
+        with open(os.path.join(FRONTEND_DIR, "index.html"), "r", encoding="utf-8") as fh:
             m = re.search(r"\?v=([\w.\-]+)", fh.read())
         return m.group(1) if m else ""
     except Exception:  # noqa: BLE001
@@ -532,7 +551,7 @@ WE_WALLPAPERS = {
 }
 _we_root_cache = {"path": None, "t": 0.0}
 MEDIA_EXT = (".mp4", ".webm", ".mkv")
-WALLPAPER_PICK_FILE = os.path.join(HERE, "_wallpapers.json")   # 用户在面板里选的壁纸（主题 → 创意工坊 id）
+WALLPAPER_PICK_FILE = os.path.join(STATE_DIR, "_wallpapers.json")   # 用户在面板里选的壁纸（主题 → 创意工坊 id）
 
 
 def _steam_roots() -> list:
@@ -623,7 +642,10 @@ def live_wallpaper_files() -> dict:
     for theme, specs in WE_WALLPAPERS.items():
         wid = str(pick.get(theme) or "")
         if wid and wid in titles:                    # ① 用户选的
-            p = _pick_media(os.path.join(root, wid))
+            folder = os.path.join(root, wid)
+            if we_project_kind(folder) != "video":   # 只支持 video 类壁纸
+                continue
+            p = _pick_media(folder)
             if p:
                 out[theme] = (os.path.relpath(p, root).replace("\\", "/"), titles.get(wid, ""))
                 continue
@@ -676,31 +698,57 @@ def _write_pick(theme: str, wid) -> dict:
     return d
 
 
+def we_project_kind(folder: str) -> str:
+    """video / scene / application / unsupported（application 一律避开）"""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return "unsupported"
+    low = [n.lower() for n in names]
+    if any(n.endswith((".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs")) for n in low):
+        return "application"
+    typ = ""
+    try:
+        with open(os.path.join(folder, "project.json"), "r", encoding="utf-8-sig") as fh:
+            typ = str(json.load(fh).get("type") or "").lower()
+    except Exception:  # noqa: BLE001
+        pass
+    if typ in ("application", "program"):
+        return "application"
+    if typ == "scene" or any(n.endswith(".pkg") for n in low):
+        return "scene"
+    if typ == "video" or any(n.endswith(MEDIA_EXT) for n in low):
+        return "video"
+    return "unsupported"
+
+
 def list_video_wallpapers() -> list:
-    """创意工坊里**所有能用浏览器播的**壁纸（有视频文件的），给前端选择器用。"""
+    """创意工坊里的 **video** 壁纸（可在浏览器里直接播）。
+    scene / application / 含 exe·dll 的项目一律不列、不解析、不执行。"""
     root = we_root()
     if not root:
         return []
     out = []
     for d, t in _we_titles(root).items():
-        p = _pick_media(os.path.join(root, d))
+        folder = os.path.join(root, d)
+        if we_project_kind(folder) != "video":
+            continue
+        p = _pick_media(folder)
         if not p:
             continue
-        rel = os.path.relpath(p, root).replace("\\", "/")
         preview = ""
         for name in ("preview.gif", "preview.jpg", "preview.png"):
-            if os.path.isfile(os.path.join(root, d, name)):
+            if os.path.isfile(os.path.join(folder, name)):
                 preview = "/we/" + quote(d) + "/" + quote(name)
                 break
+        rel = os.path.relpath(p, root).replace("\\", "/")
         try:
             size = os.path.getsize(p)
         except OSError:
             size = 0
         out.append({
-            "id": d,
-            "title": t,
-            "file": os.path.basename(rel),
-            "size_mb": round(size / 1048576.0, 1),
+            "id": d, "title": t, "kind": "video",
+            "file": os.path.basename(rel), "size_mb": round(size / 1048576.0, 1),
             "url": "/we/" + "/".join(quote(seg) for seg in rel.split("/")),
             "preview": preview,
         })
@@ -724,7 +772,7 @@ def spectrum_age():
 
 
 def start_spectrum(force: bool = False) -> None:
-    """拉起频谱采集进程（用 .audio-venv 里的 python；没有那个环境就安静跳过）。"""
+    """拉起频谱采集进程（用 runtime/venvs/audio 里的 python；没有那个环境就安静跳过）。"""
     global _spectrum_proc
     if not os.path.isfile(AUDIO_PY):
         return
@@ -735,7 +783,7 @@ def start_spectrum(force: bool = False) -> None:
     with _spectrum_lock:
         if _spectrum_proc is not None and _spectrum_proc.poll() is None:
             return
-        script = os.path.join(HERE, "tools", "spectrum.py")
+        script = os.path.join(TOOLS_DIR, "spectrum.py")
         if not os.path.isfile(script):
             return
         try:
@@ -768,6 +816,46 @@ def stop_spectrum() -> None:
             except Exception:  # noqa: BLE001
                 pass
         _spectrum_proc = None
+
+
+def music_svc_alive() -> bool:
+    """本地网易云音乐服务是否在监听。"""
+    try:
+        with socket.create_connection(("127.0.0.1", MUSIC_SVC_PORT), 0.3):
+            return True
+    except OSError:
+        return False
+
+
+def start_music_service() -> None:
+    """拉起网易云音乐服务（用 runtime/venvs/music；没有那个环境就安静跳过）。"""
+    global _musicsvc_proc
+    if not os.path.isfile(MUSIC_SVC_PY):
+        return
+    with _musicsvc_lock:
+        if _musicsvc_proc is not None and _musicsvc_proc.poll() is None:
+            return
+        script = os.path.join(TOOLS_DIR, "music_service.py")
+        if not os.path.isfile(script):
+            return
+        try:
+            _musicsvc_proc = subprocess.Popen(
+                [MUSIC_SVC_PY, script, "--port", str(MUSIC_SVC_PORT)],
+                cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+        except Exception:  # noqa: BLE001
+            _musicsvc_proc = None
+
+
+def music_service_keeper() -> None:
+    """音乐服务没在监听就重新拉起。"""
+    while True:
+        time.sleep(5)
+        try:
+            if not music_svc_alive():
+                start_music_service()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def music_keeper() -> None:
@@ -877,6 +965,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._live_pick(method)
             elif path.startswith("/we/"):
                 self._we(path)
+            elif path.startswith("/music/"):
+                self._music_proxy(method, path)
             elif path.startswith("/api/"):
                 self._proxy(method)
             else:
@@ -968,7 +1058,7 @@ class Handler(BaseHTTPRequestHandler):
         if action not in ("playpause", "play", "pause", "next", "prev", "stop"):
             self._send_json(400, {"error": "bad action", "action": action})
             return
-        script = os.path.join(HERE, "tools", "smtc-control.ps1")
+        script = os.path.join(TOOLS_DIR, "smtc-control.ps1")
         try:
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -1039,7 +1129,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- 动态壁纸（创意工坊 mp4）----------
 
     def _live_wallpapers(self):
-        """告诉前端：当前有哪些可用的动态壁纸原片（按主题），并附带标题方便核对。"""
+        """给前端：当前各主题生效的原片（只支持 video 类壁纸）。"""
         root = we_root()
         files = live_wallpaper_files() if root else {}
         out = {"ok": bool(files), "root": root, "hiru": None, "yoru": None, "detail": {}}
@@ -1051,7 +1141,8 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 size = 0
             out["detail"][theme] = {"title": label, "file": os.path.basename(rel),
-                                    "size_mb": round(size / 1048576.0, 1), "url": url}
+                                    "size_mb": round(size / 1048576.0, 1), "url": url,
+                                    "kind": "video"}
         self._send_json(200, out)
 
     def _live_list(self):
@@ -1106,15 +1197,16 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         return ctype
 
-    def _send_file(self, target: str):
+    def _send_file(self, target: str, base: int = 0, total: int = None, ctype: str = None):
         """发文件，**支持 Range**。
         没有 Range 的话 <video> 得把整份下完才能播（我们的壁纸原片是 300~400MB）——
         所以这里必须实现 206 / Content-Range。"""
         try:
-            size = os.path.getsize(target)
+            file_size = os.path.getsize(target)
         except OSError:
             self._send_json(404, {"error": "not found"})
             return
+        size = int(total) if total is not None else max(0, file_size - base)
         start, end, status = 0, size - 1, 200
         rng = (self.headers.get("Range") or "").strip()
         m = re.match(r"bytes=(\d*)-(\d*)$", rng)
@@ -1135,7 +1227,7 @@ class Handler(BaseHTTPRequestHandler):
             status = 206
         length = end - start + 1
         self.send_response(status)
-        self.send_header("Content-Type", self._ctype_for(target))
+        self.send_header("Content-Type", ctype or self._ctype_for(target))
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
         if status == 206:
@@ -1143,7 +1235,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         with open(target, "rb") as fh:
-            fh.seek(start)
+            fh.seek(base + start)
             left = length
             while left > 0:
                 chunk = fh.read(min(256 * 1024, left))
@@ -1155,7 +1247,7 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path: str):
         if path in ("/", ""):
             path = "/index.html"
-        root, rel = WEB_DIR, path.lstrip("/")
+        root, rel = FRONTEND_DIR, path.lstrip("/")
         for prefix, extra in EXTRA_ROOTS.items():
             if path.startswith(prefix):
                 root, rel = extra, path[len(prefix):]
@@ -1216,6 +1308,50 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 self.wfile.flush()
 
+    def _music_proxy(self, method: str, path: str):
+        """把 /music/* 代理到本地网易云服务（127.0.0.1:MUSIC_SVC_PORT）。"""
+        if not music_svc_alive():
+            start_music_service()
+        query = urlsplit(self.path).query
+        target = "http://127.0.0.1:%d%s" % (MUSIC_SVC_PORT, path[len("/music"):])
+        if query:
+            target += "?" + query
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        headers = {}
+        for key, value in self.headers.items():
+            if key.lower() in ("host", "content-length", "accept-encoding", "connection"):
+                continue
+            headers[key] = value
+        req = urllib.request.Request(target, data=body, headers=headers, method=method)
+        try:
+            upstream = urllib.request.urlopen(req, timeout=60)
+        except urllib.error.HTTPError as exc:
+            upstream = exc
+        except Exception as exc:  # noqa: BLE001
+            self._send_json(502, {"ok": False, "error": "音乐服务未就绪: %s: %s"
+                                  % (type(exc).__name__, exc)})
+            return
+        with upstream:
+            self.send_response(upstream.status)
+            declared = upstream.headers.get("Content-Length")
+            for key, value in upstream.headers.items():
+                low = key.lower()
+                if low in HOP_BY_HOP or low in ("content-length", "transfer-encoding"):
+                    continue
+                self.send_header(key, value)
+            if declared:
+                self.send_header("Content-Length", declared)
+            else:
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            self.end_headers()
+            while True:
+                chunk = upstream.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
@@ -1255,6 +1391,8 @@ def main() -> int:
     threading.Thread(target=music_keeper, daemon=True).start()
     start_spectrum()                          # 拉起频谱采集进程（真·音频条）
     threading.Thread(target=spectrum_keeper, daemon=True).start()
+    start_music_service()                     # 拉起网易云音乐服务（面板内搜歌/放歌）
+    threading.Thread(target=music_service_keeper, daemon=True).start()
 
     print("opencode-ui 已启动")
     print(f"  界面    http://{args.host}:{args.port}")

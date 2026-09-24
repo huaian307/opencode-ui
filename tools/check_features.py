@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""功能体检：把 AGENTS.md 里列过的能力逐条当断言，检查 web/app.js 是否都还在。
+r"""功能体检：把 AGENTS.md 里列过的能力逐条当断言，检查 frontend/app.js 是否都还在。
 
 背景：2026-09-22 整体重写 app.js 时丢了「消息重排」等细节，
       这类回归 jsbalance（只看括号）和 check_ids（只看 DOM id）都抓不到。
@@ -37,8 +37,10 @@ CHECKS = [
     ("音乐", "播放控制", r'api\("/qq/control"'),
     ("音乐", "音量", r'api\("/qq/volume"'),
     ("音乐", "歌词", r"/qq/lyrics\?title="),
-    ("音乐", "搜曲库", r"/qq/search\?q="),
-    ("音乐", "启停客户端", r'api\("/qq/app"'),
+    ("音乐", "条内搜索=弹窗搜索", r'musicSearch\(\$\("p-q"\)\.value\)'),
+    ("音乐", "词按钮联动歌词", r'\$\("p-lyric-btn"\)\.addEventListener'),
+    ("音乐", "进度条可拖动", r'\$\("p-seek"\)'),
+    ("音乐", "已移除启动QQ客户端按钮", r"NOT:p-app"),
     ("音乐", "真频谱", r'api\("/qq/spectrum"\)'),
     ("音乐", "真频谱开关 class", r'classList\.toggle\("real"'),
     ("音乐", "纯听歌模式同步", r"syncLyricsVisibility"),
@@ -113,11 +115,28 @@ CHECKS = [
     ("壁纸", "已不再把画面转成图片", r"NOT:toDataURL"),
     ("壁纸", "壁纸列表接口", r'api\("/live/list"\)'),
     ("壁纸", "选择落盘保存", r'api\("/live/pick"'),
-    ("壁纸", "顶栏选壁纸按钮", r'\$\("btn-wall"\)'),
-    ("壁纸", "选择后立刻换片", r"if \(liveReload\) await liveReload\(\)"),
+    ("壁纸", "已移除分类筛选按钮", r"NOT:wp-fb"),
+    ("壁纸", "壁纸搜索框", r'\$\("wp-q"\)'),
+    ("壁纸", "设置里选壁纸", r'\$\("cfg-wall"\)'),
+    ("壁纸", "已移除按 kind 过滤", r"NOT:WALL\.kind"),
+    ("壁纸", "已移除 scene 静帧分支", r"NOT:urls\.still"),
+    ("壁纸", "已移除 scene 解包标注", r"NOT:解包·"),
+    ("壁纸", "已移除 /live/we 调用", r"NOT:/live/we"),
+    ("壁纸", "已移除壁纸自带音乐开关", r"NOT:btn-wemusic"),
+    ("壁纸", "已移除 weMusic 设置", r"NOT:weMusic"),
+    ("壁纸", "已移除 we-shot 图层", r"NOT:we-shot"),
+    ("壁纸", "选壁纸后立刻换片", r"if \(liveReload\) await liveReload\(\)"),
     ("壁纸", "收起时缓慢启动", r"ramp\(liveRate, LIVE_RAMP_IN\)"),
     ("壁纸", "展开时缓慢停止", r"ramp\(LIVE_START_RATE, LIVE_RAMP_OUT\)"),
     ("壁纸", "出帧后也会确认不是黑场", r'addEventListener\("loadeddata"'),
+    # ---- 音乐（面板内搜歌/放歌 · 网易云非官方接口）----
+    ("音乐", "折叠箭头常驻", r'\$\("p-fold"\)'),
+    ("音乐", "搜索接口", r"/music/search\?p="),
+    ("音乐", "播放流代理", r"/music/stream\?p="),
+    ("音乐", "登录态查询", r'api\("/music/status"\)'),
+    ("音乐", "贴 Cookie 登录", r'api\("/music/cookie"'),
+    ("音乐", "条内结果渲染", r"function renderBarResults"),
+    ("音乐", "平台切换(网易云/QQ)", r"\.wp-pb"),
     # ---- 模型切换（顶栏「模型」按钮）----
     ("模型", "顶栏模型按钮", r'\$\("btn-model"\)'),
     ("模型", "模型清单接口", r'api\("/api/model"\)'),
@@ -152,15 +171,30 @@ HTML_CHECKS = [
     ("龙族", "设置里的歌词翻译开关", r'id="cfg-zh"'),
     ("模型", "顶栏模型按钮", r'id="btn-model"'),
     ("模型", "模型选择弹窗", r'id="mdl"'),
+    ("壁纸", "已移除分类筛选按钮", r"NOT:wp-fb"),
+    ("壁纸", "已移除壁纸音乐按钮", r"NOT:btn-wemusic"),
+    ("壁纸", "已移除 scene 筛选按钮", r"NOT:scene-we"),
+    ("壁纸", "已移除 we-shot 图层", r"NOT:we-shot"),
+    ("音乐", "音乐音频元素", r'id="mus-audio"'),
+    ("音乐", "播放条折叠箭头", r'id="p-fold"'),
+    ("音乐", "设置里贴Cookie", r'id="cfg-ck-qq"'),
+    ("音乐", "播放条平台切换", r'data-p="qq"'),
+    ("音乐", "播放条搜索框", r'id="p-q"'),
+    ("音乐", "进度条元素", r'id="p-seek"'),
 ]
 
 # style.css 里的背景层（纯 CSS 的改动 app.js/index.html 都断言不了，这里补上）
 CSS_CHECKS = [
     ("壁纸", "展开时视频层也套毛玻璃", r'html\[data-sidebar="open"\] #live-bg'),
-    ("壁纸", "有动态层时静态壁纸让位", r"html\.has-live body::after \{ display: none; \}"),
+    ("壁纸", "有动态层时静态壁纸让位", r"html\.has-live #static-bg \{ display: none; \}"),
+    ("壁纸", "静态背景两层交叉淡入", r"#static-bg \.sb\.on"),
+    ("壁纸", "静态背景按主题互斥", r'#static-bg \.sb'),
     ("壁纸", "模糊时图层撑出视口(切换不跳)", r"html\.bg-blurred #live-bg \{ inset: -3vmax; \}"),
     ("壁纸", "已删掉冻结帧样式", r"NOT:bg-freeze"),
     ("壁纸", "已删掉 has-freeze 规则", r"NOT:has-freeze"),
+    ("壁纸", "已移除 scene 图层样式", r"NOT:lb-we"),
+    ("壁纸", "已移除壁纸音乐样式", r"NOT:btn-wemusic"),
+    ("音乐", "音频控件样式", r"\.mus-audio"),
 ]
 
 
@@ -172,13 +206,13 @@ def _hit(pattern: str, text: str) -> bool:
 
 
 def main() -> int:
-    app = io.open(os.path.join(HERE, "web", "app.js"), encoding="utf-8").read()
+    app = io.open(os.path.join(HERE, "frontend", "app.js"), encoding="utf-8").read()
     # 去掉注释，避免"注释里写了但代码没了"的假通过
     js = re.sub(r"/\*.*?\*/", " ", app, flags=re.S)
     js = re.sub(r"(?<!:)//[^\n]*", " ", js)
-    html = io.open(os.path.join(HERE, "web", "index.html"), encoding="utf-8").read()
+    html = io.open(os.path.join(HERE, "frontend", "index.html"), encoding="utf-8").read()
     css = re.sub(r"/\*.*?\*/", " ",
-                 io.open(os.path.join(HERE, "web", "style.css"), encoding="utf-8").read(), flags=re.S)
+                 io.open(os.path.join(HERE, "frontend", "style.css"), encoding="utf-8").read(), flags=re.S)
 
     fails: list = []
     total = 0

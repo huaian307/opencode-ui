@@ -434,11 +434,17 @@ details.part .body.stream { max-height: none; overflow: visible; }
 
 /* ---------- 昼主题：背景插画（你指定的壁纸）---------- */
 /* 想更明显 → 把下面三个 rgba 的透明度调小；想更淡就调大。当前值让插画约占 4~6 成。 */
-[data-theme="hiru"] body::after {
-  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
-  background:
+/* ---------- 静态背景：两层交叉淡入（换主题只动 opacity，不重新解码/光栅化） ---------- */
+#static-bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+#static-bg .sb {
+  position: absolute; inset: 0; opacity: 0; transition: opacity .5s ease;
+  background-position: center 16%; background-size: cover; background-repeat: no-repeat;
+}
+#static-bg .sb.on { opacity: 1; }
+#static-bg .sb[data-bg="hiru"] {
+  background-image:
     linear-gradient(180deg, rgba(250,247,242,.34) 0%, rgba(250,247,242,.44) 55%, rgba(250,247,242,.58) 100%),
-    url("/assets/hiru-bg.jpg") center 16% / cover no-repeat;
+    url("/assets/hiru-bg.jpg");
 }
 
 /* 背景有了插画，气泡之外的小字加一层纸色柔光，保证可读 */
@@ -452,11 +458,10 @@ details.part .body.stream { max-height: none; overflow: visible; }
 
 /* ---------- 夜主题：背景插画 + 毛玻璃面板 ---------- */
 
-[data-theme="yoru"] body::after {
-  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
-  background:
+#static-bg .sb[data-bg="yoru"] {
+  background-image:
     linear-gradient(180deg, rgba(20,17,16,.34) 0%, rgba(20,17,16,.58) 55%, rgba(20,17,16,.78) 100%),
-    url("/assets/night.jpg") center / cover no-repeat;
+    url("/assets/night.jpg");
 }
 [data-theme="yoru"] #sidebar,
 [data-theme="yoru"] #topbar,
@@ -474,8 +479,9 @@ details.part .body.stream { max-height: none; overflow: visible; }
 
 /* 静态壁纸兜底（没有动态层时用它）：
    会话界面（展开）也套同一个亮度 + 毛玻璃；收起时保持原样（不模糊）。 */
-body::after { filter: brightness(var(--bg-dim, 1)); }
-html[data-sidebar="open"] body::after {
+/* 静态背景两层同样套亮度；展开时再套毛玻璃 */
+#static-bg .sb { filter: brightness(var(--bg-dim, 1)); }
+html[data-sidebar="open"] #static-bg .sb {
   filter: brightness(var(--bg-dim, 1)) blur(var(--bg-blur, 0px));
 }
 
@@ -494,11 +500,11 @@ html[data-sidebar="open"] #live-bg {
   filter: brightness(var(--bg-dim, 1)) blur(var(--bg-blur, 0px));
 }
 /* 动态层一旦上屏，静态那张就让位（否则它画在更上层，会把视频盖住） */
-html.has-live body::after { display: none; }
+html.has-live #static-bg { display: none; }
 /* 模糊会把图层边缘和"透明"混出一圈淡边：开模糊时把图层撑出视口一点。
    收起/展开都撑 —— 两层几何一致，切换时不会有一点点位移。 */
 html.bg-blurred #live-bg { inset: -3vmax; }
-html.bg-blurred[data-sidebar="open"] body::after { inset: -3vmax; }
+html.bg-blurred[data-sidebar="open"] #static-bg .sb { inset: -3vmax; }
 
 .lb-video {
   position: absolute; inset: 0; width: 100%; height: 100%;
@@ -512,7 +518,7 @@ html.bg-blurred[data-sidebar="open"] body::after { inset: -3vmax; }
 
 /* 纸色蒙层：跟静态壁纸用同一组渐变 —— 保证读字清楚、浓淡一致 */
 #live-bg .lb-wash {
-  position: absolute; inset: 0;
+  position: absolute; inset: 0; z-index: 3;
   background: linear-gradient(180deg,
     rgba(250,247,242,.34) 0%, rgba(250,247,242,.44) 55%, rgba(250,247,242,.58) 100%);
 }
@@ -520,6 +526,8 @@ html[data-theme="yoru"] #live-bg .lb-wash {
   background: linear-gradient(180deg,
     rgba(20,17,16,.34) 0%, rgba(20,17,16,.58) 55%, rgba(20,17,16,.78) 100%);
 }
+/* 白昼 + 动态壁纸：不盖纸色蒙层（用户要求"动态状态下的壁纸不要加蒙版"） */
+html[data-theme="hiru"].has-live #live-bg .lb-wash { display: none; }
 
 /* 系统要求减少动态效果：不播，直接用静态壁纸 */
 @media (prefers-reduced-motion: reduce) {
@@ -847,7 +855,6 @@ html.lyrics-on .lyrics-overlay { display: flex; }
   width: 30px; height: 30px; min-width: 30px; padding: 0;
   display: grid; place-items: center; font-size: 15px; line-height: 1;
 }
-#p-app { height: 30px; padding: 0 10px; font-size: 12px; white-space: nowrap; }
 #p-toggle .tri {
   width: 0; height: 0;
   border-left: 9px solid currentColor;
@@ -919,7 +926,7 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 .wp[hidden] { display: none; }
 
 .wp-box {
-  width: min(780px, 94vw); max-height: 86vh; overflow: auto;
+  width: min(1100px, 96vw); max-height: 92vh; overflow: auto;
   background: var(--paper); border: 1px solid var(--line);
   border-radius: 6px; box-shadow: var(--shadow); padding: 16px 18px 12px;
 }
@@ -935,7 +942,19 @@ html.lyrics-on .lyrics-overlay { display: flex; }
         display: grid; place-items: center; font-size: 16px; }
 .wp-cur { font-size: 11.5px; margin: 9px 0 6px; font-family: var(--mono); }
 
-.wp-list { display: grid; gap: 8px; margin: 6px 0 10px; }
+.wp-list { display: grid; gap: 8px; margin: 6px 0 10px;
+           grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+/* 筛选条：搜索 + 分类（列表从 4 条涨到 31 条后必须有） */
+.wp-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 2px; }
+.wp-filters input {
+  flex: 1; min-width: 170px; padding: 6px 9px; font-size: 12.5px; font-family: var(--sans);
+  color: var(--ink); background: var(--paper-2); border: 1px solid var(--line); border-radius: var(--radius);
+}
+/* 单条更紧凑，一列能放更多 */
+.wp-it { padding: 7px; gap: 9px; }
+.wp-thumb { width: 104px; height: 58px; }
+.wp-act { flex-wrap: wrap; }
+.wp-act button { padding: 5px 8px; font-size: 11.5px; }
 .wp-it {
   display: flex; align-items: center; gap: 12px; padding: 8px;
   border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-2);
@@ -950,13 +969,34 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 .wp-meta { min-width: 0; flex: 1; }
 .wp-meta b { display: block; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wp-meta i { font-style: normal; font-size: 11px; color: var(--ink-faint); font-family: var(--mono); }
+.wp-tag {
+  display: inline-block; margin-left: 6px; padding: 0 5px; vertical-align: 1px;
+  font-size: 10px; letter-spacing: .08em; border-radius: 999px;
+  color: var(--mk-cap); border: 1px solid color-mix(in srgb, var(--bronze) 50%, transparent);
+}
 .wp-act { display: flex; gap: 6px; flex: none; }
 .wp-act button { padding: 6px 10px; font-size: 12px; }
 .wp-act button.sel { background: var(--hi); border-color: var(--hi); color: #fff; font-weight: 600; }
 .wp-foot { display: flex; align-items: center; gap: 10px;
            border-top: 1px solid var(--line-soft); padding-top: 10px; font-size: 11.5px; }
 .wp-foot button { margin-left: auto; }
+.mus-audio { width: 100%; height: 36px; margin: 2px 0 8px; }
+.wp-pb { padding: 5px 9px; font-size: 12px; }
+.wp-pb.on { background: var(--hi); border-color: var(--hi); color: #fff; font-weight: 600; }
 
+/* ---- 播放进度条（可拖动）---- */
+.p-seek-row { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 0 18px 8px; }
+.p-time { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); min-width: 36px; text-align: center; }
+.p-seek {
+  flex: 1; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px;
+  background: color-mix(in srgb, var(--ink) 22%, transparent); outline: none; cursor: pointer;
+}
+.p-seek::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--hi); border: 2px solid var(--paper-2); box-shadow: 0 0 0 1px var(--hi); cursor: pointer;
+}
+.p-seek:disabled { cursor: default; opacity: .55; }
+.p-seek:disabled::-webkit-slider-thumb { background: var(--ink-faint); box-shadow: none; }
 @media (max-width: 760px) {
   .wp-thumb { width: 84px; height: 48px; }
 }
@@ -1161,6 +1201,15 @@ button.danger:hover:not(:disabled) { border-color: var(--err); }
 .ly-scroll p.cur .zh { font-size: 17px; color: color-mix(in srgb, var(--gold) 60%, currentColor); }
 body.no-lyrics-zh .ly-scroll .zh { display: none; }
 
+/* ---------- 壁纸选择器：三列网格下的卡片布局（放在最后 = 覆盖前面的旧规则）---------- */
+.wp-list { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+.wp-it { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px; }
+.wp-thumb { width: 104px; height: 58px; flex: none; }
+.wp-meta { flex: 1 1 120px; min-width: 0; }
+.wp-meta b, .wp-meta i { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wp-act { display: flex; flex: 1 1 100%; justify-content: flex-end; gap: 6px; }   /* 按钮独占一行，右对齐 */
+.wp-act button { padding: 5px 8px; font-size: 11.5px; }
+
 /* ---------- 弹窗：需要你选择（表单 / 权限请求）---------- */
 
 .ask {
@@ -1235,3 +1284,16 @@ body.no-lyrics-zh .ly-scroll .zh { display: none; }
 .ly-scroll p.next { font-size: 18px; opacity: .30; }      /* 上下句：小、透明 */
 .ly-scroll p.cur  { font-size: 32px; font-weight: 600; opacity: .97; color: var(--hi); }
 .ly-scroll p.noly { font-family: var(--sans); font-size: 15px; opacity: .5; }
+
+/* ---- 顶栏「设置」改成齿轮图标 ---- */
+#topbar .actions #btn-cfg { display: inline-flex; align-items: center; justify-content: center; }
+.ico-gear { width: 17px; height: 17px; display: block; }
+
+/* ---- 播放条：可折叠（像会话列表那样收起 / 展开）---- */
+#p-fold { padding: 0 7px; font-size: 11px; line-height: 1; transition: transform .18s ease; }
+.player.folded .p-row { padding: 4px 10px; justify-content: flex-end; gap: 0; }
+.player.folded .p-row > *:not(#p-fold) { display: none; }
+.player.folded .p-seek-row { display: none; }
+.player.folded #p-search, .player.folded #p-results { display: none !important; }
+.player.folded .p-bg { opacity: .12; }
+.player.folded #p-fold { transform: rotate(180deg); }

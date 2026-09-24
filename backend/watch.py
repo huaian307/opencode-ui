@@ -35,11 +35,15 @@ import urllib.request
 from ctypes import wintypes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+RUNTIME_DIR = os.path.join(ROOT, "runtime")
+LOGS_DIR = os.path.join(RUNTIME_DIR, "logs")
 HOST, PORT = "127.0.0.1", 8787
 URL = f"http://{HOST}:{PORT}"
 ALIVE_URL = f"{URL}/alive"
 LOCK_PORT = 8788
-LOG = os.path.join(HERE, "_watch.log")
+os.makedirs(LOGS_DIR, exist_ok=True)
+LOG = os.path.join(LOGS_DIR, "watch.log")
 
 # 任务栏联动：同目录的 taskbar.py（缺失/出错都不影响守护主流程）
 try:
@@ -56,11 +60,11 @@ SETTLE_SECONDS = 40.0        # 刚开窗后，等页面加载并发第一个心�
 MINIMIZE_DELAY = 1.5         # 开完面板窗口后，等它露面再把 OpenCode 最小化
 OPENCODE_IMAGES = ("OpenCode.exe", "opencode-cli.exe", "opencode.exe")
 
-PROFILE_DIR = os.path.join(HERE, "browser-profile")
+PROFILE_DIR = os.path.join(RUNTIME_DIR, "browser-profile")
 
 # 关掉面板窗口时是否一并关掉 OpenCode。
-# 想关掉这个行为：命令行加 --no-kill，或在本目录放一个名为 no-kill 的空文件。
-KILL_OPENCODE = ("--no-kill" not in sys.argv) and not os.path.exists(os.path.join(HERE, "no-kill"))
+# 想关掉这个行为：命令行加 --no-kill，或在 runtime/ 放一个名为 no-kill 的空文件。
+KILL_OPENCODE = ("--no-kill" not in sys.argv) and not os.path.exists(os.path.join(RUNTIME_DIR, "no-kill"))
 
 # 可选：OpenCode 退出时是否也关掉面板窗口。默认关，避免"重启 OpenCode 时窗口闪一下"。
 CLOSE_WINDOW_WHEN_OPENCODE_EXITS = False
@@ -138,7 +142,7 @@ def ensure_server() -> bool:
     log("面板服务不在，启动 server.py")
     subprocess.Popen(
         [sys.executable, os.path.join(HERE, "server.py")],
-        cwd=HERE, creationflags=DETACHED,
+        cwd=ROOT, creationflags=DETACHED,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     for _ in range(40):
@@ -310,7 +314,7 @@ def pid_alive(pid: int) -> bool:
 def panel_main_pid() -> int:
     """面板专属 profile 的浏览器主进程 PID（取创建最早的那个），用于廉价存活检查。"""
     out = ps("Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'msedge|chrome' "
-             "-and $_.CommandLine -like '*browser-profile*' } "
+             "-and $_.CommandLine -like '*" + PROFILE_DIR + "*' } "
              "| Sort-Object CreationDate | Select-Object -First 1 -ExpandProperty ProcessId")
     out = out.strip()
     return int(out) if out.isdigit() else 0
@@ -318,7 +322,7 @@ def panel_main_pid() -> int:
 
 def close_window() -> None:
     ps("Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'msedge|chrome' "
-       "-and $_.CommandLine -like '*browser-profile*' } "
+       "-and $_.CommandLine -like '*" + PROFILE_DIR + "*' } "
        "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
 
 

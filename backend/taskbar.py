@@ -7,7 +7,7 @@ r"""任务栏自动隐藏控制（面板开 = 隐藏，面板关 = 常驻可见�
 ⚠ 常量坑：`ABM_GETSTATE = 0x4`
    （**0x2 是 `ABM_QUERYPOS`**，拿它当 GETSTATE 用会读回垃圾值 —— 本项目为此把"关"误判成"开"了一次）
 
-标记文件 `_taskbar.hidden`：只有"**我们**把它藏起来"时才存在。
+标记文件 `runtime/state/_taskbar.hidden`：只有"**我们**把它藏起来"时才存在。
 守护 / 停止脚本靠它判断"要不要恢复"，从而**不会覆盖用户自己**的任务栏设置。
 
 命令行（输出一律纯 ASCII，避开 GBK 控制台）：
@@ -24,7 +24,10 @@ import sys
 from ctypes import wintypes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MARKER = os.path.join(HERE, "_taskbar.hidden")
+ROOT = os.path.dirname(HERE)
+STATE_DIR = os.path.join(ROOT, "runtime", "state")
+os.makedirs(STATE_DIR, exist_ok=True)
+MARKER = os.path.join(STATE_DIR, "_taskbar.hidden")
 
 ABM_GETSTATE = 0x00000004
 ABM_SETSTATE = 0x0000000A

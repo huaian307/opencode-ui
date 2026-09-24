@@ -45,6 +45,7 @@ IDLE_REOPEN_AFTER = 30.0
 
 def write(path: str, obj: dict) -> None:
     try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(obj, fh, ensure_ascii=False)
@@ -76,7 +77,8 @@ def open_loopback():
 def main() -> int:
     ap = argparse.ArgumentParser()
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ap.add_argument("--out", default=os.path.join(root, "_spectrum.json"))
+    state_dir = os.path.join(root, "runtime", "state")
+    ap.add_argument("--out", default=os.path.join(state_dir, "_spectrum.json"))
     ap.add_argument("--test", type=float, default=0.0, help="测试秒数，0=常驻")
     args = ap.parse_args()
 

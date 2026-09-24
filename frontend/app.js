@@ -888,7 +888,7 @@ function initPetals() {
     }
     box.appendChild(unit);
   }
-  $("btn-petals").addEventListener("click", () => setSetting("petals", !SET.petals));
+  // 落樱 / 壁纸 已并入设置弹窗（顶栏不再单独放按钮）
 }
 
 /* ---------------- 侧栏收起 / 展开 ----------------
@@ -1122,39 +1122,77 @@ function outgoingFiles() {
  * 侧栏收起时，画面中央显示滚动歌词。 */
 
 const MUSIC = {
-  on: false, qqRunning: false, barShown: false, real: false,
+  on: false, qqRunning: false, real: false, folded: false, panel: null, lyrWanted: false,
+  seekDragging: false, cur: 0, dur: 0,
   state: {}, lyrics: [], lyrKey: "", lyIdx: -1,
   posAt: 0, vol: 100, volDragging: false, volTimer: null,
 };
 
 /** QQ音乐 的 SMTC 状态不一定报 Playing（实测见过 Opened / Paused），
  *  所以「跳动」的判定放宽：只要不是在暂停/停止，就认为在放。 */
+/** 当前在放什么：面板内播放（网易云/QQ 搜索）优先，否则 QQ音乐 SMTC */
+function currentTrack() {
+  if (MUSIC.panel) return { title: MUSIC.panel.name || "", artist: MUSIC.panel.artists || "" };
+  const st = MUSIC.state || {};
+  return { title: st.title || "", artist: st.artist || "" };
+}
+
 const musicPlaying = () => {
+  const a = $("mus-audio");
+  if (MUSIC.panel) return !!(a && !a.paused && !a.ended);
   const s = String((MUSIC.state || {}).status || "");
   return MUSIC.on && s !== "Paused" && s !== "Stopped" && s !== "Closed";
 };
 
-/** 服务端每 500ms 报一次播放位置；两次轮询之间本地补上流逝时间，歌词才跟得上 */
+/** 播放位置：面板内用 <audio>.currentTime；QQ SMTC 用服务端位置 + 两次轮询之间本地补时 */
 function musicPos() {
+  const a = $("mus-audio");
+  if (MUSIC.panel && a) return a.currentTime || 0;
   const base = Number((MUSIC.state || {}).pos || 0);
   return base + (musicPlaying() ? (Date.now() - MUSIC.posAt) / 1000 : 0);
 }
 
 function renderPlayer() {
   const st = MUSIC.state || {};
-  const playing = musicPlaying();
   const bar = $("player");
-  // 关掉 QQ音乐后播放条要消失；顶栏那个 ♪ 按钮可以手动叫回来
-  bar.classList.toggle("on", !!(MUSIC.qqRunning || MUSIC.on || MUSIC.barShown));
+  const audio = $("mus-audio");
+  const panel = MUSIC.panel;                       // 面板内播放（网易云/QQ 搜索）优先显示
+  const playing = panel ? !!(audio && !audio.paused) : musicPlaying();
+  bar.classList.add("on");                     // 播放条常驻（折叠时只剩 ▾ 箭头）
+  bar.classList.toggle("folded", !!MUSIC.folded);
   bar.classList.toggle("playing", playing);
-  $("p-title").textContent = MUSIC.on ? (st.title || "（未知曲目）") : "未在播放";
-  $("p-artist").textContent = MUSIC.on ? (st.artist || "")
-    : (MUSIC.qqRunning ? "QQ音乐已启动" : "");
+  if (panel) {
+    $("p-title").textContent = panel.name || "（未知曲目）";
+    $("p-artist").textContent = (panel.artists ? panel.artists + " · " : "") + "面板播放";
+  } else {
+    $("p-title").textContent = MUSIC.on ? (st.title || "（未知曲目）") : "未在播放";
+    $("p-artist").textContent = MUSIC.on ? (st.artist || "")
+      : (MUSIC.qqRunning ? "QQ音乐已启动" : "");
+  }
   $("p-toggle").classList.toggle("playing", playing);
   $("p-toggle").title = playing ? "暂停" : "播放";
-  $("p-prev").disabled = !MUSIC.on || st.canPrev === false;
-  $("p-next").disabled = !MUSIC.on || st.canNext === false;
-  $("p-app").textContent = MUSIC.qqRunning ? "关闭QQ音乐" : "启动QQ音乐";
+  $("p-prev").disabled = !!panel || !MUSIC.on || st.canPrev === false;
+  $("p-next").disabled = !!panel || !MUSIC.on || st.canNext === false;
+  updateSeek();
+}
+
+/** 进度条：面板内播放可拖动跳转；QQ音乐(SMTC) 只显示进度（客户端没有跳转接口） */
+function updateSeek() {
+  const seek = $("p-seek");
+  if (!seek) return;
+  const a = $("mus-audio");
+  const panel = !!MUSIC.panel;
+  let cur = 0, dur = 0;
+  if (panel && a) { cur = a.currentTime || 0; dur = a.duration || 0; }
+  else { cur = musicPos(); dur = Number((MUSIC.state || {}).end || 0); }
+  MUSIC.cur = cur; MUSIC.dur = dur;
+  if (!MUSIC.seekDragging) {
+    seek.value = dur ? String(Math.round(cur / dur * Number(seek.max))) : "0";
+  }
+  const ec = $("p-cur"); if (ec) ec.textContent = musTime(cur);
+  const ed = $("p-dur"); if (ed) ed.textContent = dur ? musTime(dur) : "0:00";
+  seek.disabled = !(panel && dur);
+  seek.title = panel ? "拖动跳转到任意位置" : "QQ音乐客户端不支持拖动";
 }
 
 function renderLyrics() {
@@ -1188,15 +1226,15 @@ function highlightLyrics(force) {
 }
 
 async function ensureLyrics() {
-  const st = MUSIC.state || {};
-  const key = `${st.title || ""}|${st.artist || ""}`;
-  if (!st.title || key === MUSIC.lyrKey) return;
+  const { title, artist } = currentTrack();
+  const key = `${title}|${artist}`;
+  if (!title || key === MUSIC.lyrKey) return;
   MUSIC.lyrKey = key;
   MUSIC.lyrics = [];
   renderLyrics();
   try {
-    const r = await api(`/qq/lyrics?title=${encodeURIComponent(st.title)}`
-      + `&artist=${encodeURIComponent(st.artist || "")}`
+    const r = await api(`/qq/lyrics?title=${encodeURIComponent(title)}`
+      + `&artist=${encodeURIComponent(artist || "")}`
       + `&tr=${SET.zh ? 1 : 0}`);
     if (MUSIC.lyrKey !== key) return;                    // 期间换歌了，丢弃这次结果
     MUSIC.lyrics = (r.lines || []).filter((l) => l && l.s);
@@ -1207,12 +1245,15 @@ async function ensureLyrics() {
 /** 收起侧栏 = 纯听歌模式：歌词浮层显示；没有歌词时给一行提示，别留一片空白 */
 function syncLyricsVisibility() {
   const collapsed = document.documentElement.dataset.sidebar === "closed";
-  const withLyrics = collapsed && MUSIC.on && MUSIC.lyrics.length > 0;
+  const playing = !!(MUSIC.on || MUSIC.panel);
+  const want = MUSIC.lyrWanted || collapsed;            // 「词」按钮 或 收起侧栏 都显示歌词
+  const withLyrics = want && playing && MUSIC.lyrics.length > 0;
   document.documentElement.classList.toggle("lyrics-on", withLyrics);
   document.documentElement.classList.toggle("collapsed-focus", collapsed);
-  if (collapsed && !withLyrics) {
+  const showHint = want && playing && !MUSIC.lyrics.length;
+  if (showHint) {
     if (!MUSIC.hintShown) {
-      $("ly-scroll").innerHTML = `<p class="noly">点左上角 ☰ 展开对话</p>`;
+      $("ly-scroll").innerHTML = `<p class="noly">${MUSIC.lyrKey ? "这首歌没找到歌词" : "正在找歌词…"}</p>`;
       MUSIC.hintShown = true;
     }
   } else {
@@ -1324,74 +1365,65 @@ function initMusic() {
 
   $("p-prev").addEventListener("click", () => ctl("prev"));
   $("p-next").addEventListener("click", () => ctl("next"));
-  $("p-toggle").addEventListener("click", () => ctl("playpause"));
-  $("p-lyric-btn").addEventListener("click", () => applySidebar(
-    document.documentElement.dataset.sidebar === "closed" ? "open" : "closed"));
-
-  // 顶栏 ♪：手动显示 / 隐藏播放条（QQ音乐关掉后条子会消失，用它叫回来）
-  $("btn-music").addEventListener("click", () => {
-    MUSIC.barShown = !MUSIC.barShown;
-    renderPlayer();
+  $("p-toggle").addEventListener("click", () => {
+    const audio = $("mus-audio");
+    if (MUSIC.panel && audio) {                   // 面板内播放：直接控制 <audio>
+      if (audio.paused) audio.play().catch(() => {}); else audio.pause();
+      setTimeout(renderPlayer, 60);
+      return;
+    }
+    ctl("playpause");
+  });
+  $("p-lyric-btn").addEventListener("click", () => {
+    MUSIC.lyrWanted = !MUSIC.lyrWanted;
+    if (MUSIC.lyrWanted && !MUSIC.lyrics.length) ensureLyrics();
+    syncLyricsVisibility();
   });
 
-  // 启动 / 关闭 QQ音乐 客户端
-  $("p-app").addEventListener("click", async () => {
-    const action = MUSIC.qqRunning ? "stop" : "start";
-    const btn = $("p-app");
-    btn.disabled = true;
-    try {
-      const r = await api("/qq/app", { method: "POST", body: JSON.stringify({ action }) });
-      if (!r.ok) alert(`操作失败：${r.error || "未知错误"}`);
-    } catch (err) {
-      alert(`操作失败：${err.message}`);
-    } finally {
-      btn.disabled = false;
-      setTimeout(pollMusic, 1500);
-    }
-  });
-
-  // 搜索 QQ音乐 曲库（协议未注册，无法直接开播，所以结果点了复制到剪贴板）
-  const doSearch = async () => {
-    const kw = $("p-q").value.trim();
-    if (!kw) return;
-    const box = $("p-results");
-    box.hidden = false;
-    box.innerHTML = `<div class="hint">搜索中…</div>`;
-    try {
-      const r = await api(`/qq/search?q=${encodeURIComponent(kw)}`);
-      if (!r.items || !r.items.length) {
-        box.innerHTML = `<div class="hint">没搜到「${esc(kw)}」</div>`;
-        return;
-      }
-      box.innerHTML = `<div class="hint">点一条即复制「歌名 歌手」—— 粘到 QQ音乐 的搜索框就能播。`
-        + `（QQ音乐没有注册链接协议，所以没法由页面直接代它开播）</div>`
-        + r.items.map((it) => `<div class="it" data-copy="${esc(it.title + " " + it.artist)}">`
-          + `<b>${esc(it.title)}</b><i>${esc(it.artist)}</i>`
-          + `<i>${esc(it.album || "")}</i></div>`).join("");
-    } catch (err) {
-      box.innerHTML = `<div class="hint">搜索失败：${esc(err.message)}</div>`;
-    }
+  // 播放条自身：收起 / 展开（像会话列表那样，状态存本地）
+  // 默认折叠（只留 ▾ 箭头）；用户展开过才记住（换新 key：旧的 "0"=展开 不再算数）
+  try { MUSIC.folded = localStorage.getItem("opencode-ui.player.folded2") !== "0"; } catch { MUSIC.folded = true; }
+  const applyFold = () => {
+    $("player").classList.toggle("folded", !!MUSIC.folded);
+    try { localStorage.setItem("opencode-ui.player.folded2", MUSIC.folded ? "1" : "0"); } catch { /* 隐私模式 */ }
   };
+  $("p-fold").addEventListener("click", () => { MUSIC.folded = !MUSIC.folded; applyFold(); });
+  applyFold();
+
+  // 进度条：拖动即跳（面板内播放）；QQ SMTC 只显示
+  const seek = $("p-seek");
+  seek.addEventListener("input", () => {
+    const ratio = Number(seek.value) / Number(seek.max || 1000);
+    const a = $("mus-audio");
+    MUSIC.seekDragging = true;
+    if (MUSIC.panel && a && a.duration) { try { a.currentTime = ratio * a.duration; } catch { /* 忽略 */ } }
+    const ec = $("p-cur"); if (ec) ec.textContent = musTime(ratio * (MUSIC.dur || 0));
+  });
+  seek.addEventListener("change", () => { MUSIC.seekDragging = false; updateSeek(); });
+
+  // 条内搜索 = 和「乐」弹窗同一套（搜到即点播，走面板内播放）
   $("p-search-btn").addEventListener("click", () => {
     const box = $("p-search");
-    box.hidden = !box.hidden;
-    if (!box.hidden) $("p-q").focus();
+    const res = $("p-results");
+    const show = box.hidden;
+    box.hidden = !show;
+    res.hidden = true;                     // 结果区跟着一起收起（重开时是干净的）
+    if (show) $("p-q").focus();
   });
-  $("p-q-go").addEventListener("click", doSearch);
+  $("p-q-go").addEventListener("click", () => musicSearch($("p-q").value));
   $("p-q").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); doSearch(); }
+    if (e.key === "Enter") { e.preventDefault(); musicSearch($("p-q").value); }
   });
-  $("p-results").addEventListener("click", async (e) => {
-    const it = e.target.closest(".it");
-    if (!it) return;
-    const text = it.dataset.copy || "";
-    try {
-      await navigator.clipboard.writeText(text);
-      it.insertAdjacentHTML("beforeend", `<i style="color:var(--ok)">已复制</i>`);
-    } catch {
-      prompt("复制下面这行，粘到 QQ音乐搜索框：", text);
-    }
+  $("p-results").addEventListener("click", (e) => {
+    const it = e.target.closest(".it[data-play]");
+    if (it) musicPlay(it.dataset.play);
   });
+
+  // 平台切换（条内 + 弹窗共用同一状态）
+  document.querySelectorAll(".wp-pb").forEach((b) => {
+    b.addEventListener("click", () => setProvider(b.dataset.p || "netease"));
+  });
+  renderProvider();
 
   $("p-vol").addEventListener("input", (e) => {
     MUSIC.vol = Number(e.target.value);
@@ -1406,6 +1438,7 @@ function initMusic() {
   });
 
   setInterval(() => {
+    updateSeek();
     if (document.documentElement.classList.contains("lyrics-on")) highlightLyrics();
   }, 250);
   buildVis($("vis-bar"), VIS_WEIGHT);                    // 收起侧栏时输入框上方那条先摆好柱子
@@ -1702,7 +1735,7 @@ function renderSettings() {
 
 function initSettings() {
   const close = () => { $("cfg").hidden = true; };
-  const open = () => { $("cfg").hidden = false; renderSettings(); };
+  const open = () => { $("cfg").hidden = false; renderSettings(); musicStatus(); };
   $("btn-cfg").addEventListener("click", () => ($("cfg").hidden ? open() : close()));
   $("cfg-close").addEventListener("click", close);
   $("cfg").addEventListener("click", (e) => { if (e.target === $("cfg")) close(); });
@@ -1720,6 +1753,8 @@ function initSettings() {
     ensureLyrics();
   });
   $("cfg-wall").addEventListener("click", () => { close(); openWallpapers(); });
+  $("cfg-ck-netease").addEventListener("click", () => pasteCookie("netease"));
+  $("cfg-ck-qq").addEventListener("click", () => pasteCookie("qq"));
   $("cfg-reset").addEventListener("click", () => {
     Object.assign(SET, SET_DEFAULT);
     saveSettings();
@@ -1729,24 +1764,28 @@ function initSettings() {
 }
 
 async function initLiveBg() {
-  const box = $("live-bg");
-  const v = $("live-video");
-  if (!box || !v) return;      // 不再需要 #bg-freeze：展开后**直接用暂停的视频**当背景
   const root = document.documentElement;
+  const box = $("live-bg");
+  const A = $("live-video"), B = $("live-video2");
+  if (!box || !A || !B) return;
+  const vids = [A, B];
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
   let urls = null;
   try { urls = await api("/live/wallpapers"); } catch { urls = null; }
 
-  let curTheme = null;          // 视频里现在装的是哪个主题的片子
-  let seq = 0;                  // 切换序号：快速反复切时让上一轮流程自己作废
+  let seq = 0;                 // 切换序号：快速反复切时让上一轮流程自己作废
+  let active = A;              // 当前显示的那一层（正在播 / 暂停着当背景）
+  let curTheme = null;
   let rampTimer = null;
+  let fadeTimer = null;
 
   const themeNow = () => (root.dataset.theme === "yoru" ? "yoru" : "hiru");
   const urlOf = (t) => ((urls && urls[t]) || "");
+  const other = (v) => (v === A ? B : A);
 
   /** 量当前帧的平均亮度（只在判"是不是片头黑场"时才算：**不截图、不编码**） */
   const DARK = 12;                 // 平均亮度低于它就当黑场（0-255）
-  const frameMean = () => {
+  const frameMean = (v) => {
     if (!v.videoWidth || v.readyState < 2) return -1;
     try {
       const c = document.createElement("canvas");
@@ -1760,22 +1799,7 @@ async function initLiveBg() {
     } catch { return -1; }
   };
 
-  /** 暂停时若停在**片头黑场**（很多动态壁纸开头是淡入黑场），往前挪一点再停 ——
-   *  这样"暂停的那一帧"就是有内容的画面。全程只量亮度，不抓帧、不生成图片。
-   *  实在全黑：藏起视频，让主题自带的静态壁纸顶着（任何情况下都不会出现黑底）。 */
-  const ensureVisibleFrame = async (t) => {
-    if (v.dataset.src !== urlOf(t)) return;
-    const isDark = () => { const m = frameMean(); return m >= 0 && m < DARK; };
-    if (!isDark()) return;
-    for (const at of [1.0, 2.5, 4.0]) {
-      await seekTo(at);
-      if (v.dataset.src !== urlOf(t)) return;
-      if (!isDark()) return;
-    }
-    v.classList.remove("ready");
-  };
-
-  const seekTo = (s) => new Promise((done) => {
+  const seekTo = (v, s) => new Promise((done) => {
     if (!v.seekable || !v.seekable.length || !v.paused) return done();
     if (Math.abs(v.currentTime - s) < 0.2) return done();
     const h = () => { v.removeEventListener("seeked", h); done(); };
@@ -1786,13 +1810,13 @@ async function initLiveBg() {
 
   /** 设倍速（带保护：超出浏览器支持范围时别把整个流程炸掉） */
   const setRate = (r) => {
-    try { v.playbackRate = r; } catch { /* NotSupportedError：忽略 */ }
+    try { active.playbackRate = r; } catch { /* NotSupportedError：忽略 */ }
   };
 
   /** 把 playbackRate 从当前值线性推到 to */
   const ramp = (to, ms) => new Promise((done) => {
     clearInterval(rampTimer);
-    const from = v.playbackRate;
+    const from = active.playbackRate;
     const t0 = performance.now();
     rampTimer = setInterval(() => {
       const k = Math.min(1, (performance.now() - t0) / ms);
@@ -1801,54 +1825,98 @@ async function initLiveBg() {
     }, 40);
   });
 
-  const sync = () => {
-    const t = themeNow();
-    const url = (urls && urls[t]) || "";
-    const collapsed = root.dataset.sidebar === "closed";
-    const mine = ++seq;
-
-    if (!url || reduce.matches || !SET.live) {   // 没原片 / 系统要求减少动态 / 用户关掉了 → 静态壁纸
-      root.classList.remove("has-live");
-      clearInterval(rampTimer); rampTimer = null;
-      v.pause();
-      return;
+  /** 暂停时若停在**片头黑场**（很多动态壁纸开头是淡入黑场），往前挪一点再停。
+   *  实在全黑：藏起视频，让主题自带的静态壁纸顶着（任何情况下都不会出现黑底）。 */
+  const ensureVisibleFrame = async (t) => {
+    const v = active;
+    if (v.dataset.src !== urlOf(t)) return;
+    const isDark = () => { const m = frameMean(v); return m >= 0 && m < DARK; };
+    if (!isDark()) return;
+    for (const at of [1.0, 2.5, 4.0]) {
+      await seekTo(v, at);
+      if (v.dataset.src !== urlOf(t)) return;
+      if (!isDark()) return;
     }
-    if (v.dataset.src !== url) {         // 换片（换主题 / 用户在面板里改选）
-      curTheme = t;
-      v.dataset.src = url;
-      v.src = url;
-      v.classList.remove("ready");       // ⚠ 新片还没解码，先把它藏住：<video> 无帧时会画黑，
-                                         //   盖住下面那层静态壁纸 → 黑屏（昼夜切换时尤其明显）
-      v.load();
-    }
-    root.classList.add("has-live");
+    v.classList.remove("ready");
+  };
 
+  const play = (t, collapsed, mine) => {
     if (collapsed) {                     // 收起：从静止慢慢加速
       setRate(LIVE_START_RATE);
-      v.play().then(() => ramp(liveRate, LIVE_RAMP_IN)).catch(() => {});
-    } else {                             // 展开：慢慢减速 → **暂停**（暂停的那一帧就是静态背景，不再截图）
+      active.play().then(() => ramp(liveRate, LIVE_RAMP_IN)).catch(() => {});
+    } else {                             // 展开：慢慢减速 → **暂停**（暂停那帧就是静态背景）
       (async () => {
-        if (!v.paused) await ramp(LIVE_START_RATE, LIVE_RAMP_OUT);
+        if (!active.paused) await ramp(LIVE_START_RATE, LIVE_RAMP_OUT);
         if (mine !== seq) return;        // 期间又切了，这一轮作废
-        v.pause();
+        try { active.pause(); } catch { /* 忽略 */ }
         setRate(liveRate);
-        ensureVisibleFrame(t);           // 停在片头黑场就往前挪一点（只量亮度）
+        ensureVisibleFrame(t);
       })();
     }
   };
 
-  // 视频出第一帧了：显示它；展开态（暂停着）顺手确认这一帧不是片头黑场
-  v.addEventListener("loadeddata", () => {
-    v.classList.add("ready");
-    if (root.dataset.sidebar !== "closed") ensureVisibleFrame(curTheme || themeNow());
-  });
-  v.addEventListener("error", () => {    // 文件被删 / Steam 换盘 → 退回静态壁纸
-    if (v.dataset.src) {
-      v.dataset.src = "";
-      v.classList.remove("ready");
-      root.classList.remove("has-live");
+  const hideAll = () => {
+    root.classList.remove("has-live");
+    clearInterval(rampTimer); rampTimer = null;
+    clearTimeout(fadeTimer); fadeTimer = null;
+    vids.forEach((v) => { try { v.pause(); } catch { /* 忽略 */ } v.classList.remove("ready"); });
+    box.style.backgroundImage = "";      // 交回 CSS 里那张主题静态图
+  };
+
+  /** 把**另一层**装上新主题的片子；一出第一帧就交叉淡入（旧层在此之前一直可见 → 不露静态底） */
+  const swap = (t, url, collapsed, mine) => {
+    const next = other(active);
+    const prev = active;
+    if (next.dataset.src !== url) {
+      next.dataset.src = url;
+      next.src = url;
+      next.classList.remove("ready");
+      next.load();
     }
-  });
+    next.style.zIndex = "2"; prev.style.zIndex = "1";
+    const ready = () => {
+      if (mine !== seq) return;
+      next.classList.add("ready");       // 新层淡入（盖在旧层上）
+      active = next; curTheme = t;
+      play(t, collapsed, mine);
+      clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(() => {     // 淡完再撤掉旧层、释放解码
+        prev.classList.remove("ready");
+        try { prev.pause(); } catch { /* 忽略 */ }
+        prev.dataset.src = "";
+        prev.removeAttribute("src");
+      }, 340);
+    };
+    if (next.readyState >= 2) ready();
+    else {
+      next.addEventListener("loadeddata", ready, { once: true });
+      setTimeout(() => { if (mine === seq && next.readyState >= 2) ready(); }, 1600);
+    }
+  };
+
+  const sync = () => {
+    const t = themeNow();
+    const url = urlOf(t);
+    const collapsed = root.dataset.sidebar === "closed";
+    const mine = ++seq;
+
+    if (!url || reduce.matches || !SET.live) { hideAll(); return; }
+    box.style.backgroundImage = "";
+    root.classList.add("has-live");
+
+    if (active.dataset.src === url) {    // 已经是这张：只调播放状态
+      if (active.readyState >= 2) active.classList.add("ready");
+      play(t, collapsed, mine);
+      return;
+    }
+    swap(t, url, collapsed, mine);
+  };
+
+  // 加载失败（文件被删 / Steam 换盘）：撤掉那一层；若它是当前层就退回静态壁纸
+  vids.forEach((v) => v.addEventListener("error", () => {
+    if (v.dataset.src) { v.dataset.src = ""; v.classList.remove("ready"); }
+    if (v === active) root.classList.remove("has-live");
+  }));
   new MutationObserver(sync).observe(root,
     { attributes: true, attributeFilter: ["data-theme", "data-sidebar"] });
 
@@ -1862,10 +1930,21 @@ async function initLiveBg() {
   sync();
 }
 
+/** 静态背景：两层图按主题交叉淡入（换主题只切 opacity，避免大图重解码/光栅化卡顿） */
+function initStaticBg() {
+  const root = document.documentElement;
+  const apply = () => {
+    const t = root.dataset.theme === "yoru" ? "yoru" : "hiru";
+    document.querySelectorAll("#static-bg .sb").forEach((el) => el.classList.toggle("on", el.dataset.bg === t));
+  };
+  new MutationObserver(apply).observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+  apply();
+}
+
 /* ---------------- 动态壁纸选择器（面板里自己挑）----------------
  * 数据全部来自 server.py：/live/list 列可用壁纸、/live/pick 落盘保存（_wallpapers.json）。 */
 
-const WALL = { data: null };
+const WALL = { data: null, q: "" };
 
 async function loadWallpaperList() {
   try { WALL.data = await api("/live/list"); } catch { WALL.data = null; }
@@ -1875,17 +1954,24 @@ async function loadWallpaperList() {
 function renderWallpapers() {
   const d = WALL.data || {};
   const pick = d.pick || {};
-  const items = d.items || [];
+  const all = d.items || [];
+  const q = (WALL.q || "").trim().toLowerCase();
+  const items = all.filter((it) => {
+    if (!q) return true;
+    return [it.title, it.file, it.id].some((x) => String(x || "").toLowerCase().includes(q));
+  });
   const box = $("wp-list");
   const nameOf = (id) => {
     const it = items.find((x) => x.id === id);
     return it ? (it.title || it.id) : id;
   };
   $("wp-cur").textContent = "当前：白昼 " + (pick.hiru ? nameOf(pick.hiru) : "（默认）")
-    + "　｜　夜晚 " + (pick.yoru ? nameOf(pick.yoru) : "（默认）");
+    + "　｜　夜晚 " + (pick.yoru ? nameOf(pick.yoru) : "（默认）")
+    + "　｜　共 " + all.length + " 张"
+    + (q ? "（筛出 " + items.length + " 张）" : "");
   if (!items.length) {
-    box.innerHTML = `<div class="muted" style="padding:10px">没找到能播的动态壁纸`
-      + `（只列 video 类型的；scene 类型是私有格式，浏览器放不了）。</div>`;
+    box.innerHTML = `<div class="muted" style="padding:10px">没有匹配的壁纸`
+      + `（换个筛选，或清空上面的搜索框）。</div>`;
     return;
   }
   box.innerHTML = items.map((it) => {
@@ -1921,9 +2007,10 @@ async function pickWallpaper(theme, id) {
 
 function initWallpaperPicker() {
   const close = () => { $("wp").hidden = true; };
-  $("btn-wall").addEventListener("click", () => ($("wp").hidden ? openWallpapers() : close()));
+  // 入口改到设置弹窗里的「选壁纸…」（cfg-wall）；顶栏不再单独放按钮
   $("wp-close").addEventListener("click", close);
   $("wp").addEventListener("click", (e) => { if (e.target === $("wp")) close(); });
+  $("wp-q").addEventListener("input", (e) => { WALL.q = e.target.value; renderWallpapers(); });
   $("wp-list").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-slot]");    // ⚠ 别用 data-theme：那会套上主题变量
     if (!b) return;
@@ -1937,6 +2024,123 @@ function initWallpaperPicker() {
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("wp").hidden) close();
   });
+}
+
+/* ---------------- 面板内搜歌/放歌（网易云 · 非官方接口，走 /music/* 代理）---------------- */
+
+const MUS = { list: [], playing: null, provider: "netease" };
+
+function setMusStatus(t) { /* 兼容旧调用：状态改在设置/结果区显示 */ }
+
+async function pasteCookie(provider) {
+  const hint = provider === "qq"
+    ? "粘贴 y.qq.com 的【完整】Cookie（含 uin 与 qm_keyst，别截断）："
+    : "粘贴 music.163.com 的 Cookie（含 MUSIC_U）：";
+  const ck = prompt(hint, "");
+  if (ck === null) return;
+  try {
+    const r = await api("/music/cookie", { method: "POST", body: JSON.stringify({ provider, cookie: ck.trim() }) });
+    const keys = (r && r.keys) || [];
+    const miss = (r && r.missing) || [];
+    alert(miss.length
+      ? "已保存，但缺少关键字段：" + miss.join("、") + "；检测到：" + (keys.join("、") || "（没有 key=value，像不是 Cookie）")
+      : "已保存；检测到：" + keys.join("、"));
+    musicStatus();
+  } catch (e) { alert("保存失败：" + (e && e.message ? e.message : e)); }
+}
+
+function setProvider(p) {
+  MUS.provider = p === "qq" ? "qq" : "netease";
+  renderProvider();
+  MUS.list = []; MUS.playing = null;
+  renderBarResults();
+  musicStatus();
+}
+
+function renderProvider() {
+  document.querySelectorAll(".wp-pb").forEach((b) => b.classList.toggle("on", b.dataset.p === MUS.provider));
+}
+
+/** 条内结果列表（紧凑 .it 行；点一下即在面板里播） */
+function renderBarResults() {
+  const box = $("p-results");
+  if (!box) return;
+  if (!MUS.list.length) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = `<div class="hint">点一条即在面板里播放（`
+    + (MUS.provider === "qq" ? "QQ音乐" : "网易云") + `）：</div>`
+    + MUS.list.map((it) => `<div class="it" data-play="${esc(it.id)}">`
+      + `<b>${esc(it.name)}</b><i>${esc(it.artists)}</i>`
+      + `<i>${esc(it.album || "")}</i></div>`).join("");
+}
+
+function musTime(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+
+async function musicSearch(qRaw) {
+  const q = String(qRaw || "").trim();
+  if (!q) return;
+  const box = $("p-results");
+  if (box) { box.hidden = false; box.innerHTML = '<div class="hint">搜索中…</div>'; }
+  try {
+    const r = await api("/music/search?p=" + MUS.provider + "&q=" + encodeURIComponent(q) + "&limit=20");
+    MUS.list = (r && r.songs) || [];
+    renderBarResults();
+    if (!MUS.list.length && box) box.innerHTML = '<div class="hint">没搜到「' + esc(q) + '」</div>';
+  } catch (e) {
+    if (box) box.innerHTML = '<div class="hint">搜索失败：' + esc(e && e.message ? e.message : e) + '</div>';
+  }
+}
+
+async function musicPlay(id) {
+  const a = $("mus-audio");
+  const box = $("p-results");
+  MUS.playing = String(id);
+  renderBarResults();
+  const it = (MUS.list || []).find((x) => String(x.id) === String(id)) || {};
+  const mid2 = it.mediaMid ? "&mid2=" + encodeURIComponent(it.mediaMid) : "";
+  if (box) box.innerHTML = '<div class="hint">解析音源…（' + esc(it.name || "") + '）</div>';
+  try {
+    const r = await api("/music/url?p=" + MUS.provider + "&id=" + encodeURIComponent(id) + mid2);
+    if (!r || !r.ok) {
+      if (box) box.innerHTML = '<div class="hint">' + esc((r && r.error) || "该曲目无可用音源") + '</div>';
+      MUS.playing = null; MUSIC.panel = null;
+      renderBarResults(); renderPlayer();
+      return;
+    }
+  } catch (e) {
+    if (box) box.innerHTML = '<div class="hint">解析失败：' + esc(e && e.message ? e.message : e) + '</div>';
+    MUS.playing = null; renderBarResults();
+    return;
+  }
+  a.src = "/music/stream?p=" + MUS.provider + "&id=" + encodeURIComponent(id) + mid2;
+  a.play().catch(() => { /* 由 audio 的 error/ended 处理 */ });
+  MUSIC.panel = { name: it.name || "（未知曲目）", artists: it.artists || "", id: MUS.playing };
+  if (box) box.hidden = true;                     // 播起来就把结果区收起来
+  renderPlayer();
+  ensureLyrics();
+}
+
+async function musicStatus() {
+  try {
+    const r = await api("/music/status");
+    const p = (r && r.providers) || {};
+    const put = (id, st) => { const b = $(id); if (b) b.textContent = (st && st.loggedIn) ? "已登录 · 重贴" : "贴 Cookie"; };
+    put("cfg-ck-netease", p.netease);
+    put("cfg-ck-qq", p.qq);
+  } catch { /* 服务没起来就保持原样 */ }
+}
+
+/** 音频事件：播放 / 暂停 / 结束 都刷新播放条与歌词 */
+function initMusicAudio() {
+  const audio = $("mus-audio");
+  ["play", "pause", "ended", "error"].forEach((ev) => audio.addEventListener(ev, () => {
+    if (ev === "ended") MUSIC.panel = null;
+    renderPlayer();
+    syncLyricsVisibility();
+  }));
 }
 
 /* ---------------- 模型切换（顶栏「模型」按钮）----------------
@@ -2184,7 +2388,9 @@ $("messages").addEventListener("scroll", () => {
   initAttachments();
   initMusic();
   initLiveBg();
+  initStaticBg();
   initWallpaperPicker();
+  initMusicAudio();
   initSettings();
   initModelPicker();
   initAsk();

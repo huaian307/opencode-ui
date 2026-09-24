@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""下载模型的官方品牌图标 → web/assets/models/（一次性，之后前端只用本地文件）
+r"""下载模型的官方品牌图标 → frontend/assets/models/（一次性，之后前端只用本地文件）
 
 为什么这么做：
   · OpenCode 的 `/api/model`、`/api/provider` **都没有图标字段**（已查证）；
@@ -23,7 +23,7 @@ import os
 import urllib.request
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(HERE, "web", "assets", "models")
+OUT = os.path.join(HERE, "frontend", "assets", "models")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
