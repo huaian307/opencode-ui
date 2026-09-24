@@ -12,6 +12,7 @@ resources/references/
 **/__pycache__/
 *.pyc
 cache/
+frontend/_probe*.html
 
 # ---- 运行时产物（本机生成，不该带进仓库）----
 runtime/logs/

@@ -380,6 +380,7 @@ def open_window(hide_taskbar: bool = True):
                 [exe, f"--app={URL}", f"--user-data-dir={PROFILE_DIR}",
                  "--start-maximized", "--no-first-run", "--no-default-browser-check",
                  "--disable-background-mode", "--disable-sync",
+                 "--autoplay-policy=no-user-gesture-required",   # 刷新后能接着播上一首
                  "--disable-features=Translate,MediaRouter"],
                 creationflags=NO_WINDOW,
             )

@@ -1122,7 +1122,7 @@ function outgoingFiles() {
  * 侧栏收起时，画面中央显示滚动歌词。 */
 
 const MUSIC = {
-  on: false, qqRunning: false, real: false, folded: false, panel: null, lyrWanted: false,
+  on: false, qqRunning: false, real: false, folded: false, panel: null, panelError: "", lyrWanted: false,
   seekDragging: false, cur: 0, dur: 0,
   state: {}, lyrics: [], lyrKey: "", lyIdx: -1,
   posAt: 0, vol: 100, volDragging: false, volTimer: null,
@@ -1163,7 +1163,8 @@ function renderPlayer() {
   bar.classList.toggle("playing", playing);
   if (panel) {
     $("p-title").textContent = panel.name || "（未知曲目）";
-    $("p-artist").textContent = (panel.artists ? panel.artists + " · " : "") + "面板播放";
+    $("p-artist").textContent = (panel.artists ? panel.artists + " · " : "")
+      + (MUSIC.panelError || "面板播放");
   } else {
     $("p-title").textContent = MUSIC.on ? (st.title || "（未知曲目）") : "未在播放";
     $("p-artist").textContent = MUSIC.on ? (st.artist || "")
@@ -1171,8 +1172,9 @@ function renderPlayer() {
   }
   $("p-toggle").classList.toggle("playing", playing);
   $("p-toggle").title = playing ? "暂停" : "播放";
-  $("p-prev").disabled = !!panel || !MUSIC.on || st.canPrev === false;
-  $("p-next").disabled = !!panel || !MUSIC.on || st.canNext === false;
+  const canQueue = !!panel && (MUS.list || []).length > 1;
+  $("p-prev").disabled = panel ? !canQueue : (!MUSIC.on || st.canPrev === false);
+  $("p-next").disabled = panel ? !canQueue : (!MUSIC.on || st.canNext === false);
   updateSeek();
 }
 
@@ -1363,16 +1365,31 @@ function initMusic() {
     method: "POST", body: JSON.stringify({ action }),
   }).catch(() => { /* 失败无所谓，下一轮轮询会刷新状态 */ });
 
-  $("p-prev").addEventListener("click", () => ctl("prev"));
-  $("p-next").addEventListener("click", () => ctl("next"));
+  $("p-prev").addEventListener("click", () => (MUSIC.panel ? musicPrev() : ctl("prev")));
+  $("p-next").addEventListener("click", () => (MUSIC.panel ? musicNext(false) : ctl("next")));
   $("p-toggle").addEventListener("click", () => {
     const audio = $("mus-audio");
     if (MUSIC.panel && audio) {                   // 面板内播放：直接控制 <audio>
-      if (audio.paused) audio.play().catch(() => {}); else audio.pause();
+      if (audio.paused) {
+        if (audio.getAttribute("src")) audio.play().catch(() => {});
+        else if (MUS.playing) musicPlay(MUS.playing, { play: true });
+      } else {
+        audio.pause();
+      }
       setTimeout(renderPlayer, 60);
       return;
     }
     ctl("playpause");
+  });
+  $("p-shuffle").addEventListener("click", () => {
+    MUS.shuffle = !MUS.shuffle;
+    updatePlayModeButtons();
+    saveMusicState();
+  });
+  $("p-loop").addEventListener("click", () => {
+    MUS.loop = !MUS.loop;
+    updatePlayModeButtons();
+    saveMusicState();
   });
   $("p-lyric-btn").addEventListener("click", () => {
     MUSIC.lyrWanted = !MUSIC.lyrWanted;
@@ -1443,6 +1460,7 @@ function initMusic() {
   }, 250);
   buildVis($("vis-bar"), VIS_WEIGHT);                    // 收起侧栏时输入框上方那条先摆好柱子
   setInterval(drawSpectrum, 70);                         // 真频谱：70ms 一帧
+  updatePlayModeButtons();
 
   pollMusic();
 }
@@ -2048,7 +2066,41 @@ function initWallpaperPicker() {
 
 /* ---------------- 面板内搜歌/放歌（网易云 · 非官方接口，走 /music/* 代理）---------------- */
 
-const MUS = { list: [], playing: null, provider: "netease" };
+const MUS = { list: [], playing: null, provider: "netease", loop: true, shuffle: false, seq: 0 };
+const MUS_KEY = "opencode-ui.music";
+const MUS_SAVE_EVERY = 2000;                  // 播放中每隔 2s 落一次盘，刷新后能接着放
+
+/** 面板刷新后要能恢复：把「曲目 + 队列 + 播放模式 + 进度」存 localStorage */
+function musicSnapshot() {
+  const a = $("mus-audio");
+  return {
+    v: 1,
+    provider: MUS.provider,
+    list: MUS.list || [],
+    playing: MUS.playing || null,
+    loop: !!MUS.loop,
+    shuffle: !!MUS.shuffle,
+    panel: MUSIC.panel ? { ...MUSIC.panel } : null,
+    pos: a ? (a.currentTime || 0) : 0,
+    wasPlaying: !!(MUSIC.panel && a && !a.paused && !a.ended),
+  };
+}
+
+function saveMusicState() {
+  try { localStorage.setItem(MUS_KEY, JSON.stringify(musicSnapshot())); } catch { /* 隐私模式 */ }
+}
+
+let musicSavedAt = 0;
+function saveMusicStateThrottled() {
+  const now = Date.now();
+  if (now - musicSavedAt < MUS_SAVE_EVERY) return;
+  musicSavedAt = now;
+  saveMusicState();
+}
+
+function loadMusicState() {
+  try { return JSON.parse(localStorage.getItem(MUS_KEY) || "{}") || {}; } catch { return {}; }
+}
 
 function setMusStatus(t) { /* 兼容旧调用：状态改在设置/结果区显示 */ }
 
@@ -2075,6 +2127,7 @@ function setProvider(p) {
   MUS.list = []; MUS.playing = null;
   renderBarResults();
   musicStatus();
+  saveMusicState();
 }
 
 function renderProvider() {
@@ -2089,7 +2142,8 @@ function renderBarResults() {
   box.hidden = false;
   box.innerHTML = `<div class="hint">点一条即在面板里播放（`
     + (MUS.provider === "qq" ? "QQ音乐" : "网易云") + `）：</div>`
-    + MUS.list.map((it) => `<div class="it" data-play="${esc(it.id)}">`
+    + MUS.list.map((it) => `<div class="it${String(it.id) === String(MUS.playing) ? " on" : ""}"`
+      + ` data-play="${esc(it.id)}">`
       + `<b>${esc(it.name)}</b><i>${esc(it.artists)}</i>`
       + `<i>${esc(it.album || "")}</i></div>`).join("");
 }
@@ -2108,39 +2162,134 @@ async function musicSearch(qRaw) {
     const r = await api("/music/search?p=" + MUS.provider + "&q=" + encodeURIComponent(q) + "&limit=20");
     MUS.list = (r && r.songs) || [];
     renderBarResults();
+    saveMusicState();
     if (!MUS.list.length && box) box.innerHTML = '<div class="hint">没搜到「' + esc(q) + '」</div>';
   } catch (e) {
     if (box) box.innerHTML = '<div class="hint">搜索失败：' + esc(e && e.message ? e.message : e) + '</div>';
   }
 }
 
-async function musicPlay(id) {
+async function musicPlay(id, opts = {}) {
   const a = $("mus-audio");
   const box = $("p-results");
-  MUS.playing = String(id);
+  id = String(id || "");
+  let it = (MUS.list || []).find((x) => String(x.id) === id);
+  if (!it && MUSIC.panel && String(MUSIC.panel.id) === id) it = { ...MUSIC.panel };
+  if (!it || !id) return false;
+  const seq = ++MUS.seq;
+
+  MUS.playing = id;
+  MUSIC.panel = {
+    name: it.name || "（未知曲目）",
+    artists: it.artists || "",
+    album: it.album || "",
+    id,
+  };
+  MUSIC.panelError = "";
   renderBarResults();
-  const it = (MUS.list || []).find((x) => String(x.id) === String(id)) || {};
+  renderPlayer();
+
   const mid2 = it.mediaMid ? "&mid2=" + encodeURIComponent(it.mediaMid) : "";
-  if (box) box.innerHTML = '<div class="hint">解析音源…（' + esc(it.name || "") + '）</div>';
+  if (box && !opts.silent) box.innerHTML = '<div class="hint">解析音源…（' + esc(it.name || "") + '）</div>';
   try {
     const r = await api("/music/url?p=" + MUS.provider + "&id=" + encodeURIComponent(id) + mid2);
+    if (seq !== MUS.seq) return false;             // 期间又切歌了，丢弃这次结果
     if (!r || !r.ok) {
-      if (box) box.innerHTML = '<div class="hint">' + esc((r && r.error) || "该曲目无可用音源") + '</div>';
-      MUS.playing = null; MUSIC.panel = null;
-      renderBarResults(); renderPlayer();
-      return;
+      MUSIC.panelError = (r && r.error) || "该曲目无可用音源";
+      if (box && !opts.silent) box.innerHTML = '<div class="hint">' + esc(MUSIC.panelError) + '</div>';
+      renderPlayer();
+      saveMusicState();
+      return false;
     }
   } catch (e) {
-    if (box) box.innerHTML = '<div class="hint">解析失败：' + esc(e && e.message ? e.message : e) + '</div>';
-    MUS.playing = null; renderBarResults();
-    return;
+    if (seq !== MUS.seq) return false;
+    MUSIC.panelError = "解析失败：" + (e && e.message ? e.message : e);
+    if (box && !opts.silent) box.innerHTML = '<div class="hint">' + esc(MUSIC.panelError) + '</div>';
+    renderPlayer();
+    saveMusicState();
+    return false;
   }
+
+  const pos = Number(opts.position) || 0;
+  const applyPos = () => { if (pos > 0) { try { a.currentTime = pos; } catch { /* 元数据可能已换 */ } } };
+  a.addEventListener("loadedmetadata", applyPos, { once: true });
   a.src = "/music/stream?p=" + MUS.provider + "&id=" + encodeURIComponent(id) + mid2;
-  a.play().catch(() => { /* 由 audio 的 error/ended 处理 */ });
-  MUSIC.panel = { name: it.name || "（未知曲目）", artists: it.artists || "", id: MUS.playing };
-  if (box) box.hidden = true;                     // 播起来就把结果区收起来
+  try { a.load(); } catch { /* 老浏览器忽略 */ }
+  if (box && !opts.silent) box.hidden = true;     // 播起来就把结果区收起来
   renderPlayer();
   ensureLyrics();
+  if (opts.play !== false) {
+    // 刷新后自动续播：watch.py 已给面板窗口加 --autoplay-policy=no-user-gesture-required；
+    // 万一仍被拦，播放条会停在同一首，用户点一下播放即可。
+    a.play().catch(() => {});
+  }
+  saveMusicState();
+  return true;
+}
+
+/** 下一首（面板队列）。auto=true 表示歌曲自然放完触发；loop 关闭时到队尾就停。 */
+async function musicNext(auto, dir = 1) {
+  const list = MUS.list || [];
+  if (!list.length) return false;
+  let idx = list.findIndex((x) => String(x.id) === String(MUS.playing));
+  if (idx < 0) idx = dir > 0 ? -1 : 0;
+  const total = list.length;
+  for (let tries = 0; tries < total; tries++) {
+    if (MUS.shuffle && total > 1) {
+      let n = idx;
+      while (n === idx) n = Math.floor(Math.random() * total);
+      idx = n;
+    } else {
+      const next = idx + dir;
+      if (auto && !MUS.loop && dir > 0 && next >= total) return false;
+      idx = ((next % total) + total) % total;
+    }
+    const ok = await musicPlay(list[idx].id, { play: true });
+    if (ok) return true;
+  }
+  return false;
+}
+
+function musicPrev() { return musicNext(false, -1); }
+
+function updatePlayModeButtons() {
+  const s = $("p-shuffle"), l = $("p-loop");
+  if (s) {
+    s.classList.toggle("on", !!MUS.shuffle);
+    s.title = "随机播放：" + (MUS.shuffle ? "开" : "关");
+  }
+  if (l) {
+    l.classList.toggle("on", !!MUS.loop);
+    l.title = "自动连播：" + (MUS.loop ? "开" : "关");
+  }
+}
+
+/** 刷新后把上次的曲目/队列/进度恢复回来；能不能自动续播由浏览器策略决定。 */
+async function restoreMusicState() {
+  const st = loadMusicState();
+  MUS.provider = st.provider === "qq" ? "qq" : "netease";
+  MUS.loop = st.loop !== false;
+  MUS.shuffle = !!st.shuffle;
+  renderProvider();
+  updatePlayModeButtons();
+  if (!st.panel || !st.playing) return;
+  MUS.playing = String(st.playing);
+  if (Array.isArray(st.list) && st.list.length) {
+    MUS.list = st.list;
+  } else {
+    MUS.list = [{
+      id: MUS.playing,
+      name: st.panel.name || "",
+      artists: st.panel.artists || "",
+      album: st.panel.album || "",
+    }];
+  }
+  renderBarResults();
+  await musicPlay(MUS.playing, {
+    play: !!st.wasPlaying,
+    position: Number(st.pos) || 0,
+    silent: true,
+  });
 }
 
 async function musicStatus() {
@@ -2153,14 +2302,21 @@ async function musicStatus() {
   } catch { /* 服务没起来就保持原样 */ }
 }
 
-/** 音频事件：播放 / 暂停 / 结束 都刷新播放条与歌词 */
+/** 音频事件：播放 / 暂停 / 结束 都刷新播放条与歌词；并负责落盘进度 */
 function initMusicAudio() {
   const audio = $("mus-audio");
   ["play", "pause", "ended", "error"].forEach((ev) => audio.addEventListener(ev, () => {
-    if (ev === "ended") MUSIC.panel = null;
+    if (ev === "ended" && (MUS.loop || MUS.shuffle) && (MUS.list || []).length) {
+      musicNext(true);                       // 自动连播 / 随机播放
+      return;
+    }
     renderPlayer();
     syncLyricsVisibility();
+    saveMusicState();
   }));
+  audio.addEventListener("timeupdate", saveMusicStateThrottled);
+  window.addEventListener("pagehide", saveMusicState);
+  window.addEventListener("beforeunload", saveMusicState);
 }
 
 /* ---------------- 模型切换（顶栏「模型」按钮）----------------
@@ -2411,6 +2567,7 @@ $("messages").addEventListener("scroll", () => {
   initStaticBg();
   initWallpaperPicker();
   initMusicAudio();
+  restoreMusicState();                   // 刷新后面板内歌曲信息 / 队列 / 进度恢复
   initSettings();
   initModelPicker();
   initAsk();

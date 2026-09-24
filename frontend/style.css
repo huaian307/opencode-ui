@@ -851,9 +851,15 @@ html.lyrics-on .lyrics-overlay { display: flex; }
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .p-ctrl { display: flex; gap: 6px; align-items: center; }
-#p-prev, #p-next, #p-toggle, #p-lyric-btn, #p-search-btn, #p-q-go {
+#p-prev, #p-next, #p-toggle, #p-shuffle, #p-loop, #p-lyric-btn, #p-search-btn, #p-q-go {
   width: 30px; height: 30px; min-width: 30px; padding: 0;
-  display: grid; place-items: center; font-size: 15px; line-height: 1;
+  display: grid; place-items: center; font-size: 14px; line-height: 1;
+}
+#p-shuffle, #p-loop { color: var(--ink-faint); }
+#p-shuffle.on, #p-loop.on {
+  color: var(--hi);
+  border-color: color-mix(in srgb, var(--hi) 55%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--hi) 22%, transparent) inset;
 }
 #p-toggle .tri {
   width: 0; height: 0;
@@ -899,6 +905,8 @@ html.lyrics-on .lyrics-overlay { display: flex; }
   border-radius: var(--radius); cursor: pointer; font-size: 12.5px;
 }
 .p-results .it:hover { background: color-mix(in srgb, var(--hi) 10%, transparent); }
+.p-results .it.on { background: color-mix(in srgb, var(--hi) 14%, transparent); }
+.p-results .it.on b { color: var(--hi); }
 .p-results .it b { font-weight: 500; }
 .p-results .it i { font-style: normal; color: var(--ink-faint); font-size: 11.5px; }
 .p-results .hint { padding: 6px 8px; color: var(--ink-faint); font-size: 11.5px; line-height: 1.7; }
