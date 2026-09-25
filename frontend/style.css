@@ -985,7 +985,7 @@ html.lyrics-on .lyrics-overlay { display: flex; }
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .p-ctrl { display: flex; gap: 6px; align-items: center; }
-#p-prev, #p-next, #p-toggle, #p-shuffle, #p-loop, #p-lyric-btn, #p-search-btn, #p-q-go, #p-lib, #p-home {
+#p-prev, #p-next, #p-toggle, #p-shuffle, #p-loop, #p-lyric-btn, #p-search-btn, #p-q-go, #p-home {
   width: 30px; height: 30px; min-width: 30px; padding: 0;
   display: grid; place-items: center; font-size: 14px; line-height: 1;
 }
@@ -1035,7 +1035,7 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 .p-results { position: relative; z-index: 1; max-height: 190px; overflow-y: auto; padding: 0 18px 10px; }
 .p-results[hidden] { display: none; }
 .p-results .it {
-  display: flex; align-items: baseline; gap: 8px; padding: 5px 8px;
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px;
   border-radius: var(--radius); cursor: pointer; font-size: 12.5px;
 }
 .p-results .it:hover { background: color-mix(in srgb, var(--hi) 10%, transparent); }
@@ -1043,6 +1043,11 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 .p-results .it.on b { color: var(--hi); }
 .p-results .it b { font-weight: 500; }
 .p-results .it i { font-style: normal; color: var(--ink-faint); font-size: 11.5px; }
+.p-results .it .it-cover {
+  width: 32px; height: 32px; flex: none; display: block; object-fit: cover;
+  border-radius: 4px; border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--ink-faint) 12%, transparent);
+}
 .p-results .hint { padding: 6px 8px; color: var(--ink-faint); font-size: 11.5px; line-height: 1.7; }
 .p-results-h { display: flex; align-items: center; gap: 8px; }
 .p-results-h span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1082,10 +1087,15 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 .mus-nav-i { text-align: left; padding: 8px 12px; font-size: 13px; }
 .mus-nav-i.on { background: var(--hi); border-color: var(--hi); color: #fff; font-weight: 600; }
 .mus-pl {
-  display: flex; align-items: baseline; gap: 10px; padding: 8px 10px;
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
   border-radius: var(--radius); cursor: pointer; font-size: 12.5px;
 }
 .mus-pl:hover { background: color-mix(in srgb, var(--hi) 10%, transparent); }
+.mus-pl .pl-cover {
+  width: 40px; height: 40px; flex: none; display: block; object-fit: cover;
+  border-radius: 4px; border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--ink-faint) 12%, transparent);
+}
 .mus-pl b { font-weight: 500; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mus-pl i { font-style: normal; color: var(--ink-faint); font-size: 11.5px; flex: none; }
 .ico-house { width: 15px; height: 15px; }
@@ -1100,12 +1110,17 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 .mus-main-h button { margin-left: auto; flex: none; padding: 4px 12px; font-size: 12px; }
 .mus-songs { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px 14px; }
 .mus-song {
-  display: grid; grid-template-columns: 34px 1.4fr 1fr 1fr 52px; gap: 10px; align-items: center;
+  display: grid; grid-template-columns: 40px 34px 1.4fr 1fr 1fr 52px; gap: 10px; align-items: center;
   padding: 7px 10px; border-radius: var(--radius); cursor: pointer; font-size: 12.5px;
 }
 .mus-song:hover { background: color-mix(in srgb, var(--hi) 10%, transparent); }
 .mus-song.on { background: color-mix(in srgb, var(--hi) 14%, transparent); }
 .mus-song.on .s-name { color: var(--hi); }
+.mus-song .s-cover {
+  width: 36px; height: 36px; display: block; object-fit: cover;
+  border-radius: 4px; border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--ink-faint) 12%, transparent);
+}
 .mus-song .s-no { text-align: right; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
 .mus-song .s-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mus-song .s-artist, .mus-song .s-album {
@@ -1116,7 +1131,7 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 
 @media (max-width: 820px) {
   .mus-nav { width: 84px; }
-  .mus-song { grid-template-columns: 30px 1.6fr 1fr 48px; }
+  .mus-song { grid-template-columns: 40px 30px 1.6fr 1fr 48px; }
   .mus-song .s-album { display: none; }
 }
 

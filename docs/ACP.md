@@ -174,10 +174,16 @@ python tools\check_features.py       :: 功能体检（含 7 条引擎断言，�
 
 ## 8. 已知限制
 
-- **模型清单/切换已接**（2026-09-24）：从 `session/new` 返回的 `configOptions`（`category == "model"`）取清单，
+- **模型清单/切换已接**（2026-09-24；2026-09-26 修「重启/切 agent 后旧会话拿不到清单」）：
+  从 `session/new` **以及 `session/resume` / `session/load`** 返回的 `configOptions`（`category == "model"`）取清单，
   `/api/model` 返回、`/api/model/default` 返回当前值、切换走 `session/set_config_option`；
-  **思考强度（`effort`）做成 variants**（off/low/high/max）。用量/费用仍未接（`usage_update`）。
-  ⚠ 模型清单来自**会话**：没建过会话前 `/api/model` 会是空的（先新建一个会话即可）。
+  **思考强度（`effort`）做成 variants**（off/low/high/max）。
+  - ⚠ 模型清单来自**会话**：一条会话都没有时 `/api/model` 仍然是空的（先新建一个会话）。
+  - `/api/model` 发现配置还没记住时，会拿「当前 agent 最近的一条会话」`session/resume` 一次来补全
+    （失败就顺次试最近几条）—— 所以 **服务重启 / 切 agent 之后，旧会话也能拿到模型清单**，不用新建会话。
+  - 兼容只回 `models`（`SessionModelState`）、不回 `configOptions` 的适配器：清单仍会显示，
+    切换改用 `session/set_model`。
+  - 用量/费用仍未接（`usage_update`）。
 - 会话**已持久化**：会话+消息落盘在 `runtime/state/_acp_sessions.json`，**重启后仍能列出**；
   第一次续聊时会用 `session/resume`（失败退 `session/load`）把会话在 agent 侧接回来。
   ⚠ 本修复**之前**丢掉的会话无法找回（当时是纯内存）。

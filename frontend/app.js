@@ -1724,15 +1724,8 @@ function initMusic() {
   });
   $("p-results").addEventListener("click", (e) => {
     if (e.target.closest("[data-close]")) { hideBarResults(); return; }
-    const pl = e.target.closest(".it[data-pl]");
-    if (pl) { musicPlaylistOpen(pl.dataset.pl, pl.dataset.name); return; }
     const it = e.target.closest(".it[data-play]");
-    if (it) musicPlay(it.dataset.play);
-  });
-  $("p-lib").addEventListener("click", () => {
-    const box = $("p-results");
-    if (MUS.view === "playlists" && box && !box.hidden) { hideBarResults(); return; }  // 再点一次收起
-    musicPlaylists();
+    if (it) musicPlay(it.dataset.play, { manual: true });
   });
 
   // 音乐主页（全页）
@@ -1754,7 +1747,7 @@ function initMusic() {
     const pl = e.target.closest(".mus-pl[data-pl]");
     if (pl) { musicPlaylistOpen(pl.dataset.pl, pl.dataset.name); return; }
     const it = e.target.closest(".mus-song[data-play]");
-    if (it) musicPlay(it.dataset.play);
+    if (it) musicPlay(it.dataset.play, { manual: true });
   });
 
   // 平台切换（条内 + 弹窗共用同一状态）
@@ -2992,6 +2985,27 @@ function renderProvider() {
   document.querySelectorAll(".wp-pb").forEach((b) => b.classList.toggle("on", b.dataset.p === MUS.provider));
 }
 
+/** 封面统一走服务端代理（只放行音乐站；落到临时缓存，选完 / 播放后清）。 */
+function coverSrc(url) {
+  return `/music/cover?p=${encodeURIComponent(MUS.provider)}&u=${encodeURIComponent(url)}`;
+}
+
+/** 生成一个封面缩略图；没有 cover 时也留个占位，避免行高跳动。 */
+function coverHtml(item, cls) {
+  return item && item.cover
+    ? `<img class="${cls}" loading="lazy" alt="" src="${esc(coverSrc(item.cover))}">`
+    : `<span class="${cls} is-empty" aria-hidden="true"></span>`;
+}
+
+/** 新插入的封面图加载失败就移除，避免出现「破图」图标。 */
+function bindCoverFallback(root) {
+  (root || document).querySelectorAll("img.it-cover, img.s-cover, img.pl-cover").forEach((im) => {
+    const fail = () => im.remove();
+    im.addEventListener("error", fail, { once: true });
+    if (im.complete && im.naturalWidth === 0) fail();
+  });
+}
+
 /** 条内结果列表（紧凑 .it 行；点一下即在面板里播） */
 function renderBarResults() {
   const box = $("p-results");
@@ -3007,8 +3021,10 @@ function renderBarResults() {
     + `<button type="button" class="p-x" data-close="1" title="收起结果">×</button></div>`
     + MUS.list.map((it) => `<div class="it${String(it.id) === String(MUS.playing) ? " on" : ""}"`
       + ` data-play="${esc(it.id)}">`
+      + coverHtml(it, "it-cover")
       + `<b>${esc(it.name)}</b><i>${esc(it.artists)}</i>`
       + `<i>${esc(it.album || "")}</i></div>`).join("");
+  bindCoverFallback(box);
 }
 
 /** 收起播放条里的结果区（搜索 / 歌单都收）。 */
@@ -3036,6 +3052,11 @@ function closeMusicHome() {
   const bs = $("body-stage");
   if (bs) bs.classList.remove("mus-open");
   MUS.homeOpen = false;
+}
+
+/** 选完歌单后清掉服务端临时封面缓存；下次再看推荐时重新抓（封面本来就是看完即弃）。 */
+function clearCoverCache() {
+  try { api("/music/cover/clear", { method: "POST", body: "{}" }).catch(() => {}); } catch { /* 忽略 */ }
 }
 
 /** 主页视图：recommend（推荐）/ mine（我的歌单）/ songs（当前队列） */
@@ -3072,8 +3093,10 @@ function renderHome() {
     if (err) { box.innerHTML = `<div class="mus-empty">${esc(err)}</div>`; return; }
     if (!items.length) { box.innerHTML = `<div class="mus-empty">加载中…</div>`; return; }
     box.innerHTML = items.map((p) => `<div class="mus-pl" data-pl="${esc(p.id)}" data-name="${esc(p.name || "")}">`
+      + coverHtml(p, "pl-cover")
       + `<b>${esc(p.name || "(无标题)")}</b>`
       + `<i>${p.count ? fmtCount(p.count) + " 播放" : ""}</i></div>`).join("");
+    bindCoverFallback(box);
     return;
   }
 
@@ -3093,11 +3116,13 @@ function renderHome() {
   }
   box.innerHTML = MUS.list.map((it, i) => `<div class="mus-song${String(it.id) === String(MUS.playing) ? " on" : ""}"`
     + ` data-play="${esc(it.id)}">`
+    + coverHtml(it, "s-cover")
     + `<span class="s-no">${i + 1}</span>`
     + `<span class="s-name">${esc(it.name || "")}</span>`
     + `<span class="s-artist">${esc(it.artists || "")}</span>`
     + `<span class="s-album">${esc(it.album || "")}</span>`
     + `<span class="s-dur">${it.duration ? musTime(it.duration) : ""}</span></div>`).join("");
+  bindCoverFallback(box);
 }
 
 /** 播放量：>=1 万折成「x 万」 */
@@ -3151,34 +3176,9 @@ function renderQueue() {
   box.innerHTML = `<div class="hint p-results-h"><span>${head}</span>${close}</div>`
     + MUS.list.map((it, i) => `<div class="it${String(it.id) === String(MUS.playing) ? " on" : ""}"`
       + ` data-play="${esc(it.id)}">`
+      + coverHtml(it, "it-cover")
       + `<b>${i + 1}. ${esc(it.name || "")}</b><i>${esc(it.artists || "")}</i></div>`).join("");
-}
-
-/** 我的歌单：列出当前平台登录用户的歌单（QQ 走 GetPlaylistByUin；网易云需 Cookie 含 MUSIC_U）。 */
-async function musicPlaylists() {
-  const box = $("p-results");
-  const pf = MUS.provider === "qq" ? "QQ音乐" : "网易云";
-  if (box) { box.hidden = false; box.innerHTML = '<div class="hint">加载 ' + pf + ' 歌单…</div>'; }
-  try {
-    const r = await api("/music/playlists?p=" + MUS.provider);
-    if (!r || !r.ok) {
-      if (box) box.innerHTML = '<div class="hint">' + esc((r && r.error) || "拿不到歌单") + '</div>';
-      return;
-    }
-    const ps = r.playlists || [];
-    if (!ps.length) { if (box) box.innerHTML = '<div class="hint">这个账号没有歌单</div>'; return; }
-    MUS.view = "playlists";
-    if (box) {
-      box.hidden = false;
-      box.innerHTML = `<div class="hint p-results-h"><span>${pf} · 我的歌单（${ps.length}）—— 点一个当播放队列</span>`
-        + `<button type="button" class="p-x" data-close="1" title="收起结果">×</button></div>`
-        + ps.map((p) => `<div class="it pl" data-pl="${esc(p.id)}" data-name="${esc(p.name || "")}">`
-          + `<b>${esc(p.name || "(无标题)")}</b><i>${p.count || 0} 首</i>`
-          + `<i>${esc(p.creator || "")}</i></div>`).join("");
-    }
-  } catch (e) {
-    if (box) box.innerHTML = '<div class="hint">歌单加载失败：' + esc(e && e.message ? e.message : e) + '</div>';
-  }
+  bindCoverFallback(box);
 }
 
 /** 打开一个歌单：把它作为播放队列并开始播放（随机开启则随机起播；循环/随机都作用于它）。 */
@@ -3202,6 +3202,7 @@ async function musicPlaylistOpen(id, name) {
     if (MUS.homeOpen) hideBarResults();
     else renderBarResults();
     renderHome();
+    clearCoverCache();                     // 选完歌单：推荐封面已完成使命，清掉临时缓存
     const first = MUS.shuffle ? songs[Math.floor(Math.random() * songs.length)].id : songs[0].id;
     musicPlay(first, { play: true });
   } catch (e) {
@@ -3299,6 +3300,7 @@ async function musicPlay(id, opts = {}) {
     // 万一仍被拦，播放条会停在同一首，用户点一下播放即可。
     a.play().catch(() => {});
   }
+  if (opts.manual) clearCoverCache();      // 用户点一首歌：封面看完即弃（自动连播不反复清）
   saveMusicState();
   return true;
 }

@@ -172,6 +172,11 @@ CHECKS = [
     ("音乐", "贴 Cookie 登录", r'api\("/music/cookie"'),
     ("音乐", "条内结果渲染", r"function renderBarResults"),
     ("音乐", "平台切换(网易云/QQ)", r"\.wp-pb"),
+    ("音乐", "已移除音乐条歌单按钮", r"NOT:p-lib"),
+    ("音乐", "推荐歌单封面", r"/music/cover\?p="),
+    ("音乐", "选完歌单清封面缓存", r'api\("/music/cover/clear"'),
+    ("音乐", "歌曲行封面(条内)", r'coverHtml\(it, "it-cover"\)'),
+    ("音乐", "歌曲行封面(主页)", r'coverHtml\(it, "s-cover"\)'),
     # ---- 模型切换（顶栏「模型」按钮）----
     ("模型", "顶栏模型按钮", r'\$\("btn-model"\)'),
     ("模型", "模型清单接口", r'api\("/api/model"\)'),
@@ -238,6 +243,7 @@ HTML_CHECKS = [
     ("音乐", "播放条连播按钮", r'id="p-loop"'),
     ("音乐", "播放条搜索框", r'id="p-q"'),
     ("音乐", "进度条元素", r'id="p-seek"'),
+    ("音乐", "已移除音乐条歌单按钮", r"NOT:p-lib"),
     ("引擎", "设置里的引擎下拉", r'id="cfg-engine"'),
     ("引擎", "引擎状态说明文字", r'id="cfg-engine-note"'),
 ]
@@ -254,6 +260,9 @@ CSS_CHECKS = [
     ("壁纸", "已移除 scene 图层样式", r"NOT:lb-we"),
     ("壁纸", "已移除壁纸音乐样式", r"NOT:btn-wemusic"),
     ("音乐", "音频控件样式", r"\.mus-audio"),
+    ("音乐", "歌单封面样式", r"\.mus-pl \.pl-cover"),
+    ("音乐", "条内歌曲封面样式", r"\.p-results \.it \.it-cover"),
+    ("音乐", "主页歌曲封面样式", r"\.mus-song \.s-cover"),
     ("壁纸", "目录用等宽字体(反斜杠不显成￥)", r"#cfg-wall-root \{ font-family: var\(--mono\)"),
     ("引擎", "引擎下拉样式", r"#cfg-engine \{"),
 ]

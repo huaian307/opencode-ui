@@ -160,9 +160,19 @@ class AcpEngine(Engine):
             if path == "/api/event" and method == "GET":
                 return self._sse(handler)
             if path == "/api/model" and method == "GET":
-                return handler._send_json(200, {"data": self.service().models()})
+                svc = self.service()
+                try:
+                    svc.ensure_model_config()      # 重启/切 agent 后旧会话也能拿到清单
+                except Exception:  # noqa: BLE001
+                    pass
+                return handler._send_json(200, {"data": svc.models()})
             if path == "/api/model/default" and method == "GET":
-                d = self.service().model_default()
+                svc = self.service()
+                try:
+                    svc.ensure_model_config()
+                except Exception:  # noqa: BLE001
+                    pass
+                d = svc.model_default()
                 if not d:
                     return handler._send_json(404, {"error": "尚不知道默认模型（先新建一个会话）"})
                 return handler._send_json(200, {"data": d})

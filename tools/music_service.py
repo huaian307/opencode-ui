@@ -9,6 +9,8 @@
     GET  /playlists?p=                   -> {ok, playlists:[{id,name,count,cover,creator}]}
     GET  /playlist?p=&id=                -> {ok, songs:[{id,name,artists,album,cover,duration,mediaMid}]}
     GET  /recommend?p=                   -> {ok, playlists:[{id,name,count,cover,creator}]}（推荐歌单）
+    GET  /cover?p=&u=                    -> 歌单封面（服务端临时缓存，只放行音乐站图片）
+    POST /cover/clear                    -> 清空歌单封面缓存（选完歌单后由前端调用）
     GET  /url?p=&id=&level=              -> {ok, url, ...}
     GET  /stream?p=&id=&level=           -> 音频流（支持 Range）
     POST /cookie  {provider, cookie}     -> 保存（cookie 为空则清除）
@@ -38,6 +40,7 @@ ROOT = os.path.dirname(HERE)
 STATE_DIR = os.path.join(ROOT, "runtime", "state")
 os.makedirs(STATE_DIR, exist_ok=True)
 COOKIE_FILE = os.path.join(STATE_DIR, "_music_cookie.json")
+COVER_DIR = os.path.join(ROOT, "runtime", "cache", "music_covers")
 PORT = 8790
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -413,6 +416,97 @@ def ne_recommend(limit: int = 12) -> list:
              "cover": it.get("picUrl") or "", "creator": ""} for it in arr]
 
 
+# ---------------- 歌单封面：服务端临时缓存 ----------------
+# 封面 URL 由上游接口给出（QQ 多为 y.gtimg.cn / p.qpic.cn，网易云多为 *.music.126.net），
+# 直接丢给 <img> 可能被防盗链挡住，所以统一走这里代理；只放行已知音乐站域名。
+# 前端每次看推荐/我的歌单都把封面抓进这个目录，选完歌单再调 /cover/clear 清掉。
+
+COVER_CTYPE = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+               ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
+COVER_HOSTS = ("music.126.net", "126.net", "gtimg.cn", "qpic.cn", "qq.com")
+COVER_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _cover_norm(url: str) -> str:
+    """把协议相对地址（//host/...）补成 https。"""
+    url = str(url or "").strip()
+    return "https:" + url if url.startswith("//") else url
+
+
+def _cover_ok(url: str) -> bool:
+    """只放行音乐站图片，避免这个代理被拿去请求任意地址。"""
+    try:
+        u = urllib.parse.urlsplit(_cover_norm(url))
+    except Exception:  # noqa: BLE001
+        return False
+    if u.scheme not in ("http", "https"):
+        return False
+    host = (u.hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in COVER_HOSTS)
+
+
+def _cover_key(url: str) -> str:
+    return hashlib.sha1(_cover_norm(url).encode("utf-8")).hexdigest()
+
+
+def _cover_lookup(key: str):
+    for ext, ctype in COVER_CTYPE.items():
+        path = os.path.join(COVER_DIR, key + ext)
+        if os.path.isfile(path):
+            return path, ctype
+    return None, None
+
+
+def _cover_ext(url: str, ctype: str) -> str:
+    ctype = (ctype or "").split(";")[0].strip().lower()
+    for ext, ct in COVER_CTYPE.items():
+        if ctype == ct:
+            return ".jpg" if ext == ".jpeg" else ext
+    path = (urllib.parse.urlsplit(_cover_norm(url)).path or "").lower()
+    for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
+        if path.endswith(ext):
+            return ".jpg" if ext == ".jpeg" else ext
+    return ".jpg"
+
+
+def _cover_fetch(url: str, provider: str):
+    referer = "https://y.qq.com/" if provider == "qq" else "https://music.163.com/"
+    req = urllib.request.Request(_cover_norm(url), headers={"User-Agent": UA, "Referer": referer})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = resp.read(COVER_MAX_BYTES + 1)
+        ctype = resp.headers.get("Content-Type") or ""
+    if len(data) > COVER_MAX_BYTES:
+        raise ValueError("cover too large")
+    if not data:
+        raise ValueError("empty cover")
+    ext = _cover_ext(url, ctype)
+    os.makedirs(COVER_DIR, exist_ok=True)
+    path = os.path.join(COVER_DIR, _cover_key(url) + ext)
+    tmp = path + ".part"
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+    return path, COVER_CTYPE.get(ext, "image/jpeg")
+
+
+def clear_covers() -> int:
+    """删掉封面缓存目录里的文件（选完歌单后调用）。删不掉的（被占用）跳过。"""
+    n = 0
+    try:
+        names = os.listdir(COVER_DIR)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return 0
+    for name in names:
+        try:
+            os.remove(os.path.join(COVER_DIR, name))
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
 # ---------------- 分发 ----------------
 
 def do_search(provider: str, q: str, limit: int, offset: int) -> list:
@@ -487,6 +581,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, do_playlist(p, (q.get("id") or [""])[0]))
             elif u.path == "/recommend":
                 self._json(200, do_recommend(p))
+            elif u.path == "/cover":
+                self._cover(p, (q.get("u") or [""])[0])
             elif u.path == "/url":
                 self._json(200, do_url(p, (q.get("id") or [""])[0],
                                        (q.get("level") or ["standard"])[0],
@@ -522,10 +618,39 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True, "provider": provider, "keys": sorted(c.keys()),
                                  "missing": missing,
                                  "loggedIn": bool(read_cookies().get(provider))})
+            elif u.path == "/cover/clear":
+                self._json(200, {"ok": True, "cleared": clear_covers()})
             else:
                 self._json(404, {"ok": False, "error": "not found"})
         except Exception as exc:  # noqa: BLE001
             self._json(500, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)})
+
+    def _cover(self, provider: str, url: str):
+        """代理并缓存歌单封面；Cache-Control: no-store 让浏览器每次都问服务端。"""
+        url = _cover_norm(url)
+        if not _cover_ok(url):
+            self._json(400, {"ok": False, "error": "invalid cover url"})
+            return
+        key = _cover_key(url)
+        path, ctype = _cover_lookup(key)
+        if not path:
+            try:
+                path, ctype = _cover_fetch(url, provider)
+            except Exception as exc:  # noqa: BLE001
+                self._json(502, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)})
+                return
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            self._json(500, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _stream(self, provider: str, sid: str, level: str, media_mid: str = ""):
         info = do_url(provider, sid, level, media_mid)

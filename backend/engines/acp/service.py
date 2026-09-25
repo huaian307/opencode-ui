@@ -79,6 +79,7 @@ class AcpService:
         self._cwd = cwd or os.getcwd()
         self._config = {}          # 最近一次 session/new 的 configOptions（模型 / 思考强度）
         self._model = ""
+        self._model_from_state = False   # True = 模型清单来自旧式 `models`（切换用 session/set_model）
         self._effort = ""
         self._bound = set()        # 已与「当前 client」绑定的会话（重启后要 resume 才能续聊）
         self._sessions_file = os.path.join(STATE_DIR, "_acp_sessions.json")
@@ -200,13 +201,43 @@ class AcpService:
             return
         for method in ("session/resume", "session/load"):
             try:
-                client.request(method, {"sessionId": sid, "cwd": cwd, "mcpServers": []}, timeout=120)
+                res = client.request(method, {"sessionId": sid, "cwd": cwd, "mcpServers": []},
+                                     timeout=120) or {}
                 with self._lock:
                     self._bound.add(sid)
+                # ⚠ resume/load 也会返回 configOptions/models：必须收下，
+                # 否则重启后旧会话的模型清单永远是空的。
+                self._capture_session_config(res)
+                self._apply_baseline(client, sid, res.get("configOptions"))
                 self._log("[acp] 已用 %s 接回会话 %s" % (method, sid))
                 return
             except Exception as exc:  # noqa: BLE001
                 self._log("[acp] %s(%s) 失败：%s" % (method, sid, exc))
+
+    def ensure_model_config(self) -> bool:
+        """补全模型清单：若当前还没记住配置（服务重启 / 刚切 agent），
+        用属于当前 agent 的最近一个会话 resume 一次，把 configOptions 收回来。
+
+        ⚠ 模型清单来自会话：没有任何会话时本来就没有可拉的，直接回 False。
+        """
+        if self._config.get("model"):
+            return True
+        with self._lock:
+            sids = [i for i in reversed(self._order)
+                    if self._owns(self._sessions.get(i) or {})]
+        if not sids:
+            return False
+        try:
+            self.ensure_started()
+        except Exception as exc:  # noqa: BLE001
+            self._log("[acp] 补全模型清单失败：%s" % exc)
+            return False
+        # 有些历史会话在 agent 侧已不存在（resume/load 会失败）→ 逐个试最近的几个。
+        for sid in sids[:5]:
+            self._ensure_bound(sid)
+            if self._config.get("model"):
+                return True
+        return False
 
     # ---------------- ACP 回调 ----------------
 
@@ -360,9 +391,47 @@ class AcpService:
         m = self._config.get("model") or {}
         if m.get("currentValue"):
             self._model = str(m["currentValue"])
+        if m:
+            self._model_from_state = False
         e = self._config.get("effort") or {}
         if e.get("currentValue"):
             self._effort = str(e["currentValue"])
+
+    def _remember_model_state(self, models):
+        """兼容只返回 `models`（ACP SessionModelState）、不返回 configOptions 的适配器。
+
+        configOptions 里有 model 时以它为准（它带思考强度等更多信息）；这里只兜底。
+        """
+        if self._config.get("model") or not isinstance(models, dict):
+            return
+        opts = []
+        for m in (models.get("availableModels") or []):
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("modelId") or m.get("id")
+            if not mid:
+                continue
+            opts.append({"value": str(mid), "name": m.get("name") or str(mid),
+                         "description": m.get("description")})
+        if not opts:
+            return
+        cur = str(models.get("currentModelId") or "")
+        self._config["model"] = {"id": "model", "name": "Model", "category": "model",
+                                 "type": "select", "currentValue": cur, "options": opts}
+        self._model_from_state = True
+        if cur:
+            self._model = cur
+
+    def _capture_session_config(self, res):
+        """从 session/new、session/resume、session/load 的结果里统一收配置。
+
+        ⚠ 这三条都可能返回模型清单；以前只认 session/new，导致服务重启 / 切 agent 后
+        旧会话的模型清单一直为空（只能新会话才有）。
+        """
+        if not isinstance(res, dict):
+            return
+        self._remember_config(res.get("configOptions"))
+        self._remember_model_state(res.get("models"))
 
     def _apply_baseline(self, client, sid, options):
         """把「共享基线」里的 mode 应用到新会话。
@@ -454,7 +523,7 @@ class AcpService:
         client = self.ensure_started()
         cwd = cwd or self._cwd
         res = client.session_new(cwd=cwd) or {}
-        self._remember_config(res.get("configOptions"))
+        self._capture_session_config(res)
         sid = res.get("sessionId") or ("acp_%d" % next(self._id))
         self._apply_baseline(client, sid, res.get("configOptions"))
         now = now_ms()
@@ -515,11 +584,17 @@ class AcpService:
             return False
         try:
             if ref and ref.get("id"):
-                client.request("session/set_config_option",
-                               {"sessionId": sid, "configId": "model", "value": ref["id"]},
-                               timeout=TURN_TIMEOUT)
+                if self._model_from_state:
+                    # 旧式 models 清单：用 session/set_model（没有 configOptions 的适配器）
+                    client.request("session/set_model",
+                                   {"sessionId": sid, "modelId": ref["id"]},
+                                   timeout=TURN_TIMEOUT)
+                else:
+                    client.request("session/set_config_option",
+                                   {"sessionId": sid, "configId": "model", "value": ref["id"]},
+                                   timeout=TURN_TIMEOUT)
                 self._model = str(ref["id"])
-            if ref and ref.get("variant"):
+            if ref and ref.get("variant") and not self._model_from_state:
                 client.request("session/set_config_option",
                                {"sessionId": sid, "configId": "effort", "value": ref["variant"]},
                                timeout=TURN_TIMEOUT)
