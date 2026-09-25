@@ -26,6 +26,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -33,6 +34,10 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs, quote
+
+import engines
+from engines.base import HOP_BY_HOP
+from engines.acp import agents as acp_agents
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -48,16 +53,9 @@ EXTRA_ROOTS = {
     "/refs/": REFS_DIR,
     "/refsq/": os.path.join(RESOURCES_DIR, "references", "q"),
 }
-SERVICE_STATE = os.path.join(os.path.expanduser("~"), ".local", "state", "opencode", "service.json")
 
 for _directory in (RUNTIME_DIR, STATE_DIR, LOGS_DIR, VENVS_DIR):
     os.makedirs(_directory, exist_ok=True)
-
-# 逐跳首部，不能端到端转发
-HOP_BY_HOP = {
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade",
-}
 
 UPSTREAM = {"url": None, "auth": None, "version": None}
 
@@ -577,6 +575,7 @@ WE_WALLPAPERS = {
 _we_root_cache = {"path": None, "t": 0.0}
 MEDIA_EXT = (".mp4", ".webm", ".mkv")
 WALLPAPER_PICK_FILE = os.path.join(STATE_DIR, "_wallpapers.json")   # 用户在面板里选的壁纸（主题 → 创意工坊 id）
+WALLPAPER_ROOT_FILE = os.path.join(STATE_DIR, "_wallpaper_root.json")  # 用户自定义的创意工坊目录（空 = 自动）
 
 
 def _steam_roots() -> list:
@@ -601,17 +600,54 @@ def _steam_roots() -> list:
     return roots
 
 
-def we_root(max_age: float = 60.0):
-    """创意工坊 431960（壁纸）目录；找不到返回 None。带缓存，别每次请求都扫盘。"""
-    now = time.time()
-    if _we_root_cache["path"] is not None and now - _we_root_cache["t"] < max_age:
-        return _we_root_cache["path"] or None
-    found = None
+def read_wallpaper_root_override() -> str:
+    """用户在设置里指定的动态壁纸目录（去掉首尾空白；没有/无效则空串）。"""
+    try:
+        with open(WALLPAPER_ROOT_FILE, "r", encoding="utf-8") as fh:
+            return str(json.load(fh).get("root") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def write_wallpaper_root_override(path: str) -> tuple:
+    """保存自定义动态壁纸目录；空串 = 恢复自动查找。返回 (ok, message)。"""
+    path = str(path or "").strip()
+    if not path:
+        try:
+            if os.path.exists(WALLPAPER_ROOT_FILE):
+                os.remove(WALLPAPER_ROOT_FILE)
+        except OSError as exc:
+            return False, f"删除记录失败：{exc}"
+        return True, "已恢复自动查找"
+    path = os.path.normpath(os.path.expandvars(os.path.expanduser(path)))
+    if not os.path.isdir(path):
+        return False, f"目录不存在：{path}"
+    try:
+        tmp = WALLPAPER_ROOT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"root": path}, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, WALLPAPER_ROOT_FILE)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"保存失败：{exc}"
+    return True, path
+
+
+def auto_we_root():
+    """自动找创意工坊 431960 目录；找不到返回 None。"""
     for r in _steam_roots():
         cand = os.path.join(r, "steamapps", "workshop", "content", WE_APPID)
         if os.path.isdir(cand):
-            found = cand
-            break
+            return os.path.normpath(cand)
+    return None
+
+
+def we_root(max_age: float = 60.0):
+    """创意工坊 431960（壁纸）目录；优先用户设置，其次自动查找。带缓存。"""
+    now = time.time()
+    if _we_root_cache["path"] is not None and now - _we_root_cache["t"] < max_age:
+        return _we_root_cache["path"] or None
+    override = read_wallpaper_root_override()
+    found = override if override and os.path.isdir(override) else auto_we_root()
     _we_root_cache["path"] = found or ""
     _we_root_cache["t"] = now
     return found
@@ -911,16 +947,6 @@ def stop_music_daemon() -> None:
 
 
 
-def read_service() -> tuple[str, str | None, str | None]:
-    """读取 OpenCode 后台服务的地址与密码。"""
-    with open(SERVICE_STATE, "r", encoding="utf-8") as fh:
-        svc = json.load(fh)
-    url = str(svc["url"]).rstrip("/")
-    pw = svc.get("password")
-    auth = "Basic " + base64.b64encode(f"opencode:{pw}".encode()).decode() if pw else None
-    return url, auth, svc.get("version")
-
-
 class Handler(BaseHTTPRequestHandler):
     server_version = "opencode-ui"
     protocol_version = "HTTP/1.1"
@@ -970,6 +996,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._alive()
             elif path == "/panel/taskbar":
                 self._panel_taskbar(method)
+            elif path == "/engine/status":
+                self._engine_status()
+            elif path == "/engine":
+                self._engine_switch(method)
+            elif path == "/engine/acp/agents":
+                self._acp_agents(method)
             elif path == "/qq/state":
                 self._qq_state()
             elif path == "/qq/control":
@@ -984,6 +1016,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._qq_spectrum()
             elif path == "/qq/app":
                 self._qq_app(method)
+            elif path == "/live/root/pick":
+                self._live_root_pick(method)
+            elif path == "/live/root":
+                self._live_root(method)
             elif path == "/live/wallpapers":
                 self._live_wallpapers()
             elif path == "/live/list":
@@ -1009,15 +1045,9 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- 健康检查 ----------
 
     def _healthz(self):
-        try:
-            url, auth, version = read_service()
-            req = urllib.request.Request(url + "/api/info", headers={"Authorization": auth or ""})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                info = json.loads(resp.read().decode("utf-8"))
-            self._send_json(200, {"ok": True, "upstream": url, "ui": ui_version(),
-                                  "version": info.get("version", version)})
-        except Exception as exc:  # noqa: BLE001
-            self._send_json(503, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        code, body = engines.active_engine().healthz()
+        body["ui"] = ui_version()
+        self._send_json(code, body)
 
     # ---------- 面板心跳 ----------
 
@@ -1061,6 +1091,109 @@ class Handler(BaseHTTPRequestHandler):
         enabled = bool(body.get("enabled", True))
         ok = write_taskbar_pref(enabled)
         self._send_json(200 if ok else 500, {"ok": ok, "enabled": enabled})
+
+    # ---------- 引擎（跟哪个 agent 对话）----------
+
+    def _engine_status(self):
+        eng = engines.active_engine()
+        self._send_json(200, {
+            "ok": True,
+            "active": eng.id,
+            "available": engines.list_engines(),
+            "detail": eng.status(),
+        })
+
+    def _engine_switch(self, method: str):
+        if method == "GET":
+            self._engine_status()
+            return
+        if method != "POST":
+            self._send_json(405, {"error": "GET or POST only"})
+            return
+        eid = str((self._read_json_body() or {}).get("engine") or "")
+        if not engines.is_registered(eid):
+            self._send_json(400, {"ok": False, "error": "未知引擎", "engine": eid,
+                                  "available": engines.list_engines()})
+            return
+        ok = engines.set_active_engine_id(eid)
+        self._send_json(200 if ok else 500, {"ok": ok, "active": engines.active_engine_id()})
+
+    def _acp_agents(self, method: str):
+        """ACP agentlist：列出 / 切换 / 修改 agent（配置在 runtime/state/_acp_agents.json）。"""
+        try:
+            eng = engines.get_engine("acp")
+        except Exception as exc:  # noqa: BLE001
+            self._send_json(500, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)})
+            return
+        if method == "GET":
+            self._send_json(200, {"ok": True, "active": eng.active_agent_id(),
+                                  "detail": eng.status(), "agents": eng.list_agents()})
+            return
+        if method != "POST":
+            self._send_json(405, {"error": "GET or POST only"})
+            return
+        b = self._read_json_body() or {}
+        act = str(b.get("action") or "")
+        if act == "detect":
+            eng.autofill_agents()
+            self._send_json(200, {"ok": True, "active": eng.active_agent_id(),
+                                  "detail": eng.status(), "agents": eng.list_agents()})
+            return
+        if act == "candidates":
+            self._send_json(200, {"ok": True, "candidates": acp_agents.scan_candidates()})
+            return
+        if act == "add-folder":
+            d = str(b.get("dir") or "")
+            cmd, note = acp_agents.infer_from_dir(d)
+            if not cmd:
+                self._send_json(400, {"ok": False,
+                                      "error": "这个文件夹里没找到 ACP agent（既没有 node 适配器，也没有 *acp*.exe）"})
+                return
+            label = b.get("label") or os.path.basename(d.rstrip("\\/")) or "agent"
+            a = eng.add_agent(label, cmd, "", {}, note)
+            if not a:
+                self._send_json(400, {"ok": False, "error": "添加失败"})
+                return
+            if b.get("activate", False):
+                eng.select_agent(a["id"])
+            self._send_json(200, {"ok": True, "added": a.get("id"), "note": note,
+                                  "active": eng.active_agent_id(),
+                                  "detail": eng.status(), "agents": eng.list_agents()})
+            return
+        if act == "add":
+            cmd = b.get("command")
+            if isinstance(cmd, str):
+                cmd = [x for x in re.split(r"\s+", cmd.strip()) if x]
+            a = eng.add_agent(b.get("label") or "", cmd,
+                              b.get("cwd") or "", b.get("env") or {}, b.get("note") or "")
+            if not a:
+                self._send_json(400, {"ok": False, "error": "需要 label 与 command"})
+                return
+            if b.get("activate", True):
+                eng.select_agent(a["id"])
+            self._send_json(200, {"ok": True, "added": a.get("id"), "active": eng.active_agent_id(),
+                                  "detail": eng.status(), "agents": eng.list_agents()})
+            return
+        if act == "delete":
+            if not eng.remove_agent(str(b.get("id") or "")):
+                self._send_json(400, {"ok": False,
+                                      "error": "不能删除（当前使用中 / 不存在 / 至少要留一个）"})
+                return
+            self._send_json(200, {"ok": True, "active": eng.active_agent_id(),
+                                  "detail": eng.status(), "agents": eng.list_agents()})
+            return
+        aid = str(b.get("id") or "")
+        if not aid:
+            self._send_json(400, {"ok": False, "error": "缺少 id"})
+            return
+        patch = {k: b[k] for k in ("label", "command", "cwd", "env", "note") if k in b}
+        if patch and not eng.patch_agent(aid, patch):
+            self._send_json(404, {"ok": False, "error": "agent 不存在", "id": aid})
+            return
+        if b.get("activate", True):
+            eng.select_agent(aid)
+        self._send_json(200, {"ok": True, "active": eng.active_agent_id(),
+                              "detail": eng.status(), "agents": eng.list_agents()})
 
     # ---------- QQ音乐 ----------
 
@@ -1168,6 +1301,70 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "bad action"})
 
     # ---------- 动态壁纸（创意工坊 mp4）----------
+
+    def _live_root_pick(self, method: str):
+        """弹一个 Windows 原生文件夹选择框；取消返回 {ok:false, canceled:true}。"""
+        if method != "POST":
+            self._send_json(405, {"error": "POST only"})
+            return
+        script = os.path.join(TOOLS_DIR, "pick_folder.ps1")
+        if not os.path.isfile(script):
+            self._send_json(500, {"ok": False, "error": "缺少 tools/pick_folder.ps1"})
+            return
+        out = os.path.join(tempfile.gettempdir(),
+                           "opencode-ui-pick-%d-%d.txt" % (os.getpid(), int(time.time() * 1000)))
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+                 "-File", script, "-OutFile", out],
+                capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW,
+            )
+            path = ""
+            try:
+                with open(out, "r", encoding="utf-8", errors="replace") as fh:
+                    path = fh.read().strip()
+            except OSError:
+                path = ""
+            if not path:
+                self._send_json(200, {"ok": False, "canceled": True, "path": ""})
+                return
+            self._send_json(200, {"ok": True, "canceled": False, "path": path})
+        except subprocess.TimeoutExpired:
+            self._send_json(504, {"ok": False, "error": "选择文件夹超时"})
+        except Exception as exc:  # noqa: BLE001
+            detail = (proc.stderr or "")[:300] if "proc" in locals() else ""
+            self._send_json(500, {"ok": False, "error": f"{type(exc).__name__}: {exc}", "detail": detail})
+        finally:
+            try:
+                if os.path.exists(out):
+                    os.remove(out)
+            except OSError:
+                pass
+
+    def _live_root(self, method: str):
+        """自定义动态壁纸读取目录：空 = 自动查找本机 Wallpaper Engine 创意工坊 431960。"""
+        if method == "GET":
+            self._send_json(200, {
+                "ok": True,
+                "override": read_wallpaper_root_override(),
+                "auto": auto_we_root() or "",
+                "effective": we_root() or "",
+            })
+            return
+        if method != "POST":
+            self._send_json(405, {"error": "GET or POST only"})
+            return
+        body = self._read_json_body() or {}
+        ok, msg = write_wallpaper_root_override(str(body.get("root") or ""))
+        _we_root_cache["path"] = None                     # 立刻让下一次请求重新解析
+        _we_root_cache["t"] = 0.0
+        self._send_json(200 if ok else 400, {
+            "ok": ok,
+            "override": read_wallpaper_root_override(),
+            "auto": auto_we_root() or "",
+            "effective": we_root() or "",
+            "message": msg,
+        })
 
     def _live_wallpapers(self):
         """给前端：当前各主题生效的原片（只支持 video 类壁纸）。"""
@@ -1302,52 +1499,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- 反向代理 ----------
 
     def _proxy(self, method: str):
-        url, auth, _ = read_service()
-
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else None
-
-        headers = {}
-        for key, value in self.headers.items():
-            low = key.lower()
-            if low in HOP_BY_HOP or low in ("host", "authorization", "content-length", "accept-encoding"):
-                continue
-            headers[key] = value
-        if auth:
-            headers["Authorization"] = auth
-
-        req = urllib.request.Request(url + self.path, data=body, headers=headers, method=method)
-        try:
-            upstream = urllib.request.urlopen(req, timeout=None)
-        except urllib.error.HTTPError as exc:
-            upstream = exc
-        except Exception as exc:  # noqa: BLE001
-            self._send_json(502, {"error": f"无法连接 OpenCode 服务: {type(exc).__name__}: {exc}", "upstream": url})
-            return
-
-        with upstream:
-            self.send_response(upstream.status)
-            for key, value in upstream.headers.items():
-                low = key.lower()
-                if low in HOP_BY_HOP or low == "content-length":
-                    continue
-                self.send_header(key, value)
-            declared = upstream.headers.get("Content-Length")
-            if declared:
-                self.send_header("Content-Length", declared)
-            else:
-                # 流式（含 SSE）：不声明长度，改用连接关闭界定结尾
-                self.send_header("Connection", "close")
-                self.close_connection = True
-            self.end_headers()
-
-            # read1 会在有数据时尽快返回，适合 SSE 实时透传
-            while True:
-                chunk = upstream.read1(16384)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
+        """交给「当前引擎」实现；默认引擎（opencode）就是原来的反代行为。"""
+        engines.active_engine().handle_api(self, method)
 
     def _music_proxy(self, method: str, path: str):
         """把 /music/* 代理到本地网易云服务（127.0.0.1:MUSIC_SVC_PORT）。"""
@@ -1409,15 +1562,20 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8787)
     args = parser.parse_args()
 
-    if not os.path.exists(SERVICE_STATE):
-        print(f"[!] 找不到 OpenCode 服务状态文件：{SERVICE_STATE}", file=sys.stderr)
-        print("    请先启动 OpenCode（桌面版或 `opencode serve`）。", file=sys.stderr)
-        return 1
-
+    eng = engines.active_engine()
+    url = None
+    version = None
     try:
-        url, _, version = read_service()
+        url, _, version = eng.read_service()
+    except FileNotFoundError:
+        print(f"[!] 引擎 {eng.id} 未就绪：找不到 {getattr(eng, 'service_state', '')}", file=sys.stderr)
+        if eng.id == "opencode":
+            print("    请先启动 OpenCode（桌面版或 `opencode serve`）。", file=sys.stderr)
+        return 1
+    except NotImplementedError:
+        pass                       # 该引擎不需要上游地址（例如 ACP 自己拉起 agent 子进程）
     except Exception as exc:  # noqa: BLE001
-        print(f"[!] 读取服务状态失败：{exc}", file=sys.stderr)
+        print(f"[!] 引擎 {eng.id} 未就绪：{exc}", file=sys.stderr)
         return 1
 
     httpd = None
@@ -1437,7 +1595,9 @@ def main() -> int:
 
     print("opencode-ui 已启动")
     print(f"  界面    http://{args.host}:{args.port}")
-    print(f"  上游    {url}  (OpenCode {version})")
+    print(f"  引擎    {eng.id}")
+    if url:
+        print(f"  上游    {url}  ({eng.label} {version})")
     print("  停止    Ctrl+C")
     try:
         httpd.serve_forever()

@@ -1,0 +1,270 @@
+# -*- coding: utf-8 -*-
+"""ACP 引擎：把 AcpService 接到 server.py 的 /api/* 语义上。
+
+配置在 runtime/state/_acp.json：
+    {"command": ["<可执行文件>", "<参数>", ...], "cwd": "D:\\some\\dir", "env": {...}}
+没有 command 就视为未配置（available=False）。
+
+S3 覆盖：/api/event（SSE）、会话增删改查、消息、prompt、interrupt、
+        form/permission 查询与回复、/api/model（占位空表）。
+模型清单（ACP session config options）留到后续。
+"""
+from __future__ import annotations
+
+import json
+import os
+import queue
+import re
+import urllib.parse
+
+from ..base import Engine
+from . import agents
+from .service import AcpService, BusyError
+
+
+def _empty(handler, code: int):
+    """发一个没有正文的响应（204 用；不能带 body）。"""
+    handler.send_response(code)
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+
+
+def _q_int(path: str, key: str, default: int) -> int:
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+    try:
+        return int((q.get(key) or [default])[0])
+    except Exception:  # noqa: BLE001
+        return default
+
+
+class AcpEngine(Engine):
+    id = "acp"
+    label = "ACP"
+
+    def __init__(self):
+        self._service = None
+        self._config = None
+
+    # ---------------- 自述 ----------------
+
+    def config(self) -> dict:
+        """当前生效的 agent（注册表）+ **共享基线**（cwd / env / mode）。
+
+        基线用于「一套规则服务所有 agent」：agent 只写自己的 command（和必要的专属 env），
+        公共的 cwd / API key / 审批模式放 baseline，避免每个 agent 各配一份。
+        """
+        if self._config is None:
+            a = agents.active_agent() or {}
+            b = agents.baseline()
+            env = {}
+            env.update(b.get("env") or {})
+            env.update(a.get("env") or {})
+            cfg = dict(a)
+            cfg["cwd"] = a.get("cwd") or b.get("cwd") or ""
+            cfg["env"] = env
+            cfg["_baseline"] = b
+            self._config = cfg
+        return self._config
+
+    def available(self) -> bool:
+        return bool(self.config().get("command"))
+
+    def read_service(self):
+        raise NotImplementedError("ACP 引擎不需要上游地址（自己拉起 agent 子进程）")
+
+    def status(self) -> dict:
+        cfg = self.config()
+        st = agents.status_of(cfg)
+        return {"id": self.id, "label": self.label, "available": self.available(),
+                "agent": self.active_agent_id(), "agentLabel": cfg.get("label") or "",
+                "ready": st["available"], "missing": st["missing"],
+                "command": cfg.get("command"), "running": self.service_running()}
+
+    # ---------------- agentlist（多 agent）----------------
+
+    def active_agent_id(self) -> str:
+        return str(agents.load_registry().get("active") or "")
+
+    def list_agents(self) -> list:
+        det = agents.detect_all_cached()
+        return [agents.public(a, det) for a in (agents.load_registry().get("agents") or [])]
+
+    def select_agent(self, aid: str) -> bool:
+        """切换当前 agent：关掉旧子进程，下次用新命令启动。"""
+        if not agents.set_active(aid):
+            return False
+        self._config = None
+        self.shutdown()
+        return True
+
+    def patch_agent(self, aid: str, patch: dict) -> dict:
+        a = agents.update_agent(aid, patch)
+        if a:
+            self._config = None
+            if str(aid) == self.active_agent_id():
+                self.shutdown()
+        return a
+
+    def autofill_agents(self) -> dict:
+        """自动检测并补全「命令不可用」的 agent；会关掉旧子进程。"""
+        r = agents.autofill()
+        self._config = None
+        self.shutdown()
+        return r
+
+    def add_agent(self, label, command, cwd="", env=None, note=""):
+        a = agents.add_agent(label, command, cwd, env, note)
+        self._config = None
+        return a
+
+    def remove_agent(self, aid) -> bool:
+        return agents.remove_agent(aid)
+
+    def healthz(self):
+        if not self.available():
+            return 503, {"ok": False, "engine": "acp",
+                         "error": "未配置 ACP agent：runtime/state/_acp.json 缺少 command"}
+        if self.service_running():
+            return 200, {"ok": True, "engine": "acp"}
+        return 200, {"ok": True, "engine": "acp", "note": "尚未启动 agent（首次建会话时拉起）"}
+
+    def service_running(self) -> bool:
+        return bool(self._service and self._service.running())
+
+    def service(self) -> AcpService:
+        if self._service is None:
+            cfg = self.config()
+            command = cfg.get("command")
+            if not command:
+                raise RuntimeError("未配置 ACP agent 命令：runtime/state/_acp.json 缺少 command")
+            self._service = AcpService(command, cwd=cfg.get("cwd"),
+                                       env=cfg.get("env"), log=lambda s: None,
+                                       agent_id=self.active_agent_id(),
+                                       baseline=cfg.get("_baseline") or {})
+        return self._service
+
+    def shutdown(self):
+        """收起 agent 子进程（供联调脚本退出时调用）。"""
+        if self._service is not None:
+            try:
+                self._service.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._service = None
+
+    # ---------------- HTTP 分派 ----------------
+
+    def handle_api(self, handler, method: str) -> None:
+        path = urllib.parse.urlsplit(handler.path).path
+        try:
+            if path == "/api/event" and method == "GET":
+                return self._sse(handler)
+            if path == "/api/model" and method == "GET":
+                return handler._send_json(200, {"data": self.service().models()})
+            if path == "/api/model/default" and method == "GET":
+                d = self.service().model_default()
+                if not d:
+                    return handler._send_json(404, {"error": "尚不知道默认模型（先新建一个会话）"})
+                return handler._send_json(200, {"data": d})
+            if path == "/api/session":
+                if method == "GET":
+                    limit = _q_int(handler.path, "limit", 50)
+                    return handler._send_json(200, {"data": self.service().list_sessions()[:limit]})
+                if method == "POST":
+                    b = handler._read_json_body() or {}
+                    loc = (b.get("location") or {}).get("directory")
+                    s = self.service().create_session(title=b.get("title"), cwd=loc, model=b.get("model"))
+                    return handler._send_json(200, {"data": s})
+                return handler._send_json(405, {"error": "GET/POST only"})
+            m = re.match(r"^/api/session/([^/]+)(?:/(.+))?$", path)
+            if m:
+                return self._session_api(handler, method,
+                                         urllib.parse.unquote(m.group(1)), m.group(2) or "")
+            return handler._send_json(404, {"error": "未知的 /api 路径", "path": path})
+        except Exception as exc:  # noqa: BLE001
+            handler._send_json(500, {"error": "%s: %s" % (type(exc).__name__, exc)})
+
+    def _session_api(self, handler, method, sid, rest):
+        svc = self.service()
+        if rest == "":
+            if method == "GET":
+                s = svc.get_session(sid)
+                if s is None:
+                    return handler._send_json(404, {"error": "会话不存在"})
+                return handler._send_json(200, {"data": s})
+            if method == "PATCH":
+                b = handler._read_json_body() or {}
+                if not svc.rename_session(sid, b.get("title") or ""):
+                    return handler._send_json(404, {"error": "会话不存在"})
+                return _empty(handler, 204)
+            if method == "DELETE":
+                svc.delete_session(sid)
+                return _empty(handler, 204)
+            return handler._send_json(405, {"error": "GET/PATCH/DELETE only"})
+
+        if rest == "message" and method == "GET":
+            limit = _q_int(handler.path, "limit", 80)
+            return handler._send_json(200, {"data": svc.messages(sid, limit)})
+        if rest == "prompt" and method == "POST":
+            b = handler._read_json_body() or {}
+            try:
+                svc.prompt(sid, b.get("text") or "", b.get("files"))
+            except KeyError:
+                return handler._send_json(404, {
+                    "error": "会话不存在（可能刚切换过引擎：请刷新面板，或在左侧重选一个会话）"})
+            except BusyError as exc:
+                return handler._send_json(409, {"error": str(exc)})
+            return handler._send_json(200, {"ok": True})
+        if rest == "interrupt" and method == "POST":
+            svc.interrupt(sid)
+            return handler._send_json(200, {"ok": True})
+        if rest == "model" and method == "POST":
+            b = handler._read_json_body() or {}
+            svc.set_model(sid, b.get("model"))
+            return _empty(handler, 204)
+        if rest == "form" and method == "GET":
+            return handler._send_json(200, {"data": svc.list_forms(sid)})
+        if rest == "permission" and method == "GET":
+            return handler._send_json(200, {"data": svc.list_permissions(sid)})
+
+        mf = re.match(r"^form/([^/]+)/reply$", rest)
+        if mf and method == "POST":
+            b = handler._read_json_body() or {}
+            svc.reply_form(sid, urllib.parse.unquote(mf.group(1)), b.get("answer") or {})
+            return _empty(handler, 204)
+        mp = re.match(r"^permission/([^/]+)/reply$", rest)
+        if mp and method == "POST":
+            b = handler._read_json_body() or {}
+            svc.reply_permission(sid, urllib.parse.unquote(mp.group(1)), b.get("decision") or "reject")
+            return _empty(handler, 204)
+        return handler._send_json(404, {"error": "未知的会话子路径", "sub": rest})
+
+    # ---------------- SSE ----------------
+
+    def _sse(self, handler):
+        svc = self.service()
+        q = svc.subscribe()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "keep-alive")
+        handler.end_headers()
+
+        def frame(obj):
+            data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            handler.wfile.write(b"data: " + data + b"\n\n")
+            handler.wfile.flush()
+
+        try:
+            frame({"type": "server.connected", "data": {}})
+            while True:
+                try:
+                    frame(q.get(timeout=15.0))
+                except queue.Empty:
+                    handler.wfile.write(b": ping\n\n")
+                    handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            svc.unsubscribe(q)
+            handler.close_connection = True

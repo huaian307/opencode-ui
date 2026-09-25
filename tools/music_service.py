@@ -6,6 +6,9 @@
 
     GET  /status                         -> {ok, providers:{netease:{loggedIn,cookieTail}, qq:{...}}}
     GET  /search?p=&q=&limit=&offset=    -> {ok, songs:[{id,name,artists,album,cover,duration}]}
+    GET  /playlists?p=                   -> {ok, playlists:[{id,name,count,cover,creator}]}
+    GET  /playlist?p=&id=                -> {ok, songs:[{id,name,artists,album,cover,duration,mediaMid}]}
+    GET  /recommend?p=                   -> {ok, playlists:[{id,name,count,cover,creator}]}（推荐歌单）
     GET  /url?p=&id=&level=              -> {ok, url, ...}
     GET  /stream?p=&id=&level=           -> 音频流（支持 Range）
     POST /cookie  {provider, cookie}     -> 保存（cookie 为空则清除）
@@ -140,6 +143,43 @@ def ne_stream_headers() -> dict:
     return {"User-Agent": UA, "Referer": "https://music.163.com/"}
 
 
+def _ne_data(r) -> dict:
+    """NeteaseCloudMusic 的响应统一是 {code, data}；取内层 data。"""
+    return (r or {}).get("data") or {}
+
+
+def ne_playlists() -> dict:
+    """登录用户自己的歌单（网易云）。需要 Cookie 含 MUSIC_U，否则 account 为 null。"""
+    api = get_api()
+    ck = read_cookies()["netease"]
+    acc = _ne_data(api.request("/user/account", {"cookie": ck}))
+    uid = (acc.get("account") or {}).get("id") or (acc.get("profile") or {}).get("userId")
+    if not uid:
+        return {"ok": False, "error": "网易云未登录：Cookie 需含 MUSIC_U（到设置里重新粘贴【完整】Cookie）"}
+    pl = _ne_data(api.request("/user/playlist", {"uid": uid, "limit": 100, "offset": 0, "cookie": ck}))
+    out = []
+    for p in (pl.get("playlist") or []):
+        out.append({"id": p.get("id"), "name": p.get("name") or "",
+                    "count": p.get("trackCount") or 0, "cover": p.get("coverImgUrl") or "",
+                    "creator": (p.get("creator") or {}).get("nickname") or ""})
+    return {"ok": True, "uid": uid, "playlists": out}
+
+
+def ne_playlist_songs(pid, limit: int = 300) -> list:
+    api = get_api()
+    ck = read_cookies()["netease"]
+    d = _ne_data(api.request("/playlist/track/all", {"id": pid, "limit": limit, "offset": 0, "cookie": ck}))
+    songs = d.get("songs") or d.get("tracks") or []
+    out = []
+    for s in songs:
+        al = s.get("al") or {}
+        out.append({"id": s.get("id"), "name": s.get("name"),
+                    "artists": " / ".join(a.get("name", "") for a in (s.get("ar") or [])),
+                    "album": al.get("name", ""), "cover": al.get("picUrl", ""),
+                    "duration": int((s.get("dt") or 0) / 1000)})
+    return out
+
+
 # ---------------- QQ音乐（算法来自 Mineradio server.js，纯标准库）----------------
 
 QQ_UA_AND = "QQMusic 14090508(android 12)"
@@ -188,6 +228,21 @@ def qq_uin_key() -> tuple:
     return (uin or "0"), key
 
 
+def _qq_track(it: dict) -> dict:
+    """把 QQ 的 track_info / songlist item 归一成我们的歌曲结构（搜索与歌单共用）。"""
+    ti = it.get("track_info") or it.get("songInfo") or it.get("songinfo") or it.get("song") or it
+    al = ti.get("album") or {}
+    mid = ti.get("mid") or (ti.get("file") or {}).get("media_mid") or ""
+    cover = ""
+    if al.get("mid"):
+        cover = "https://y.gtimg.cn/music/photo_new/T002R300x300M000%s.jpg" % al["mid"]
+    return {"id": mid, "name": ti.get("name") or "",
+            "artists": " / ".join((s.get("name") or "") for s in (ti.get("singer") or [])),
+            "album": al.get("name") or "", "cover": cover,
+            "duration": int(ti.get("interval") or 0),
+            "mediaMid": (ti.get("file") or {}).get("media_mid") or ""}
+
+
 def qq_search(q: str, limit: int, offset: int) -> list:
     payload = {"comm": QQ_COMM, "req": {
         "module": "music.search.SearchCgiService", "method": "DoSearchForQQMusicMobile",
@@ -207,20 +262,7 @@ def qq_search(q: str, limit: int, offset: int) -> list:
     body_data = data.get("body") or data
     items = (body_data.get("item_song")
              or (body_data.get("song") or {}).get("list") or body_data.get("list") or [])
-    out = []
-    for it in items:
-        ti = it.get("track_info") or it.get("songInfo") or it.get("songinfo") or it.get("song") or it
-        al = ti.get("album") or {}
-        mid = ti.get("mid") or (ti.get("file") or {}).get("media_mid") or ""
-        cover = ""
-        if al.get("mid"):
-            cover = "https://y.gtimg.cn/music/photo_new/T002R300x300M000%s.jpg" % al["mid"]
-        out.append({"id": mid, "name": ti.get("name") or "",
-                    "artists": " / ".join((s.get("name") or "") for s in (ti.get("singer") or [])),
-                    "album": al.get("name") or "", "cover": cover,
-                    "duration": int(ti.get("interval") or 0),
-                    "mediaMid": (ti.get("file") or {}).get("media_mid") or ""})
-    return out
+    return [_qq_track(it) for it in items]
 
 
 QQ_QUALITY = [("M800", ".mp3", "320k"), ("F000", ".flac", "无损"),
@@ -304,10 +346,97 @@ def _probe_audio(url: str) -> bool:
         return False
 
 
+def _qq_fcg(module: str, method: str, param: dict) -> dict:
+    """调 QQ 移动端 musics.fcg（带 sign）；返回 req.data。"""
+    uin, key = qq_uin_key()
+    payload = {"comm": dict(QQ_COMM, uin=uin, ct=19 if key else 24, cv=0),
+               "req": {"module": module, "method": method, "param": param}}
+    if key:
+        payload["comm"]["authst"] = key
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = {"User-Agent": QQ_UA_AND, "Content-Type": "application/json",
+               "Content-Length": str(len(body))}
+    ck = read_cookies()["qq"]
+    if ck:
+        headers["Cookie"] = ck
+    js = _http_json("https://u.y.qq.com/cgi-bin/musics.fcg?sign=" + qq_sign(body.decode("utf-8")), body, headers)
+    return ((js.get("req") or {}).get("data")) or {}
+
+
+def qq_playlists() -> dict:
+    """登录用户自己的歌单（QQ音乐）。"""
+    uin, _ = qq_uin_key()
+    if not uin or uin == "0":
+        return {"ok": False, "error": "QQ音乐未登录：贴【完整】Cookie（uin=…; qm_keyst=…）"}
+    data = _qq_fcg("music.musicasset.PlaylistBaseRead", "GetPlaylistByUin", {"uin": uin})
+    out = []
+    for p in (data.get("v_playlist") or []):
+        out.append({"id": p.get("tid"), "dirId": p.get("dirId"), "name": p.get("dirName") or "",
+                    "count": p.get("songNum") or 0, "cover": p.get("picUrl") or "",
+                    "creator": p.get("nick") or ""})
+    return {"ok": True, "uin": uin, "playlists": out}
+
+
+def qq_playlist_songs(pid, limit: int = 300) -> list:
+    data = _qq_fcg("music.srfDissInfo.DissInfo", "CgiGetDiss",
+                   {"disstid": int(pid), "num": limit, "page": 0})
+    return [_qq_track(it) for it in (data.get("songlist") or [])]
+
+
+def qq_recommend(limit: int = 12) -> list:
+    """QQ 推荐歌单（公开 fcg，无需登录）。"""
+    q = {"picmid": "1", "rnd": str(int(time.time())), "g_tk": "5381",
+         "loginUin": "0", "hostUin": "0", "format": "json",
+         "inCharset": "utf8", "outCharset": "utf-8", "notice": "0",
+         "platform": "yqq.json", "needNewCode": "0",
+         "categoryId": "10000000", "sortId": "5", "sin": "0", "ein": str(max(1, limit))}
+    url = ("https://c.y.qq.com/splcloud/fcgi-bin/fcg_get_diss_by_tag.fcg?"
+           + urllib.parse.urlencode(q))
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://y.qq.com/"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        js = json.loads(r.read().decode("utf-8", "replace"))
+    lst = ((js.get("data") or {}).get("list")) or []
+    return [{"id": it.get("dissid"), "name": it.get("dissname") or "",
+             "count": it.get("listennum") or 0,
+             "cover": it.get("imgurl") or it.get("disscover") or "",
+             "creator": ""} for it in lst]
+
+
+def ne_recommend(limit: int = 12) -> list:
+    """网易云推荐歌单（/personalized，公开）。"""
+    api = get_api()
+    ck = read_cookies()["netease"]
+    d = _ne_data(api.request("/personalized", {"limit": limit, "cookie": ck}))
+    arr = d.get("result") or []
+    return [{"id": it.get("id"), "name": it.get("name") or "",
+             "count": it.get("playCount") or it.get("playcount") or 0,
+             "cover": it.get("picUrl") or "", "creator": ""} for it in arr]
+
+
 # ---------------- 分发 ----------------
 
 def do_search(provider: str, q: str, limit: int, offset: int) -> list:
     return qq_search(q, limit, offset) if provider == "qq" else ne_search(q, limit, offset)
+
+
+def do_playlists(provider: str) -> dict:
+    return qq_playlists() if provider == "qq" else ne_playlists()
+
+
+def do_playlist(provider: str, pid: str) -> dict:
+    try:
+        songs = qq_playlist_songs(pid) if provider == "qq" else ne_playlist_songs(pid)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+    return {"ok": True, "songs": songs}
+
+
+def do_recommend(provider: str) -> dict:
+    try:
+        items = qq_recommend() if provider == "qq" else ne_recommend()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+    return {"ok": True, "playlists": items}
 
 
 def do_url(provider: str, sid: str, level: str, media_mid: str = "") -> dict:
@@ -352,6 +481,12 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json(200, {"ok": True, "songs": do_search(
                     p, kw, int((q.get("limit") or ["20"])[0]), int((q.get("offset") or ["0"])[0]))})
+            elif u.path == "/playlists":
+                self._json(200, do_playlists(p))
+            elif u.path == "/playlist":
+                self._json(200, do_playlist(p, (q.get("id") or [""])[0]))
+            elif u.path == "/recommend":
+                self._json(200, do_recommend(p))
             elif u.path == "/url":
                 self._json(200, do_url(p, (q.get("id") or [""])[0],
                                        (q.get("level") or ["standard"])[0],

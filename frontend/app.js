@@ -55,17 +55,107 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-/** 极简 Markdown：```代码块```、`行内代码`、**加粗**；其余按纯文本安全转义 */
+/** Markdown 渲染（无依赖；XSS 安全：先整体 HTML 转义，再套我们自己的标签）。
+ *  支持：```代码块```、`行内代码`、**加粗**、*斜体*、~~删除线~~、
+ *        标题(#..######)、无序/有序列表、> 引用、--- 分割线、
+ *        [文字](链接)（只放行 http(s)/mailto/相对/#）、标准 GFM 表格。
+ *  其余按纯文本显示。 */
 function renderText(src) {
-  return String(src ?? "").split(/```/).map((chunk, i) => {
+  const parts = String(src ?? "").split(/```/);
+  let out = "";
+  for (let i = 0; i < parts.length; i++) {
     if (i % 2 === 1) {
-      const nl = chunk.indexOf("\n");
-      return `<pre>${esc((nl >= 0 ? chunk.slice(nl + 1) : chunk).replace(/\n+$/, ""))}</pre>`;
+      let body = parts[i];
+      const nl = body.indexOf("\n");
+      if (nl >= 0) body = body.slice(nl + 1);      // 去掉 ``` 那行的语言标注
+      out += `<pre>${esc(body.replace(/\n+$/, ""))}</pre>`;
+    } else {
+      out += renderBlocks(parts[i]);
     }
-    return esc(chunk)
-      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  }).join("");
+  }
+  return out;
+}
+
+/** 行内 Markdown：内部先转义，再只插入我们自己的安全标签。 */
+function inlineMd(raw) {
+  let s = esc(raw);
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, t, u) =>
+    /^(https?:|mailto:|\/|#)/i.test(u) ? `<a href="${u}" target="_blank" rel="noreferrer">${t}</a>` : t);
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  return s.replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[+i]}</code>`);
+}
+
+const MD_H = /^(#{1,6})\s+(.*)$/;
+const MD_UL = /^\s*[-*+]\s+/;
+const MD_OL = /^\s*\d+\.\s+/;
+const MD_HR = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+const MD_BQ = /^\s*>\s?/;
+const MD_SEP = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+function mdCells(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+/** 块级 Markdown → HTML（表格 / 列表 / 标题 / 引用 / 分割线 / 段落）。 */
+function renderBlocks(md) {
+  const lines = md.split("\n");
+  let out = "", p = [], i = 0;
+  const flushP = () => {
+    if (p.length) out += `<div class="md-p">${p.map(inlineMd).join("<br>")}</div>`;
+    p = [];
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*$/.test(line)) { flushP(); i++; continue; }
+    // GFM 表格：本行含 | 且下一行是分隔行
+    if (line.indexOf("|") >= 0 && i + 1 < lines.length && MD_SEP.test(lines[i + 1])) {
+      flushP();
+      const head = mdCells(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].indexOf("|") >= 0 && lines[i].trim() !== "") {
+        rows.push(mdCells(lines[i]));
+        i++;
+      }
+      out += `<table><thead><tr>${head.map((c) => `<th>${inlineMd(c)}</th>`).join("")}</tr></thead>`
+        + `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${inlineMd(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      continue;
+    }
+    const h = line.match(MD_H);
+    if (h) { flushP(); const lv = Math.min(h[1].length, 6); out += `<h${lv}>${inlineMd(h[2])}</h${lv}>`; i++; continue; }
+    if (MD_HR.test(line)) { flushP(); out += "<hr>"; i++; continue; }
+    if (MD_BQ.test(line)) {
+      flushP();
+      const q = [];
+      while (i < lines.length && MD_BQ.test(lines[i])) { q.push(lines[i].replace(MD_BQ, "")); i++; }
+      out += `<blockquote>${q.map(inlineMd).join("<br>")}</blockquote>`;
+      continue;
+    }
+    if (MD_UL.test(line)) {
+      flushP();
+      const items = [];
+      while (i < lines.length && MD_UL.test(lines[i])) { items.push(lines[i].replace(MD_UL, "")); i++; }
+      out += `<ul>${items.map((x) => `<li>${inlineMd(x)}</li>`).join("")}</ul>`;
+      continue;
+    }
+    if (MD_OL.test(line)) {
+      flushP();
+      const items = [];
+      while (i < lines.length && MD_OL.test(lines[i])) { items.push(lines[i].replace(MD_OL, "")); i++; }
+      out += `<ol>${items.map((x) => `<li>${inlineMd(x)}</li>`).join("")}</ol>`;
+      continue;
+    }
+    p.push(line); i++;
+  }
+  flushP();
+  return out;
 }
 
 const fmtTime = (ms) => (ms ? new Date(ms).toLocaleString("zh-CN", { hour12: false }) : "");
@@ -80,9 +170,11 @@ const state = {
   messages: [],         // 服务端「已完成」的消息
   live: {},             // 生成中的消息缓冲（由 SSE 增量驱动）
   reveal: {},           // 打字机已显示字数 { msgID: { text, reasoning } }
+  frozen: {},           // 已被用户中止的轮次 { msgID: true } —— 迟到增量一律丢弃
   pending: [],          // 本地乐观回显「我发的消息」
   attachments: [],      // 待发送附件
   named: {},            // 已经自动命名过的会话 { id: true } —— 每个会话最多命名一次
+  detailOpen: {},       // 侧栏会话详情展开状态 { id: true }
   follow: true,         // 是否跟随最新内容自动往下滚
   refreshing: false,
   pendingRefresh: false,
@@ -100,6 +192,40 @@ async function loadSessions() {
   }
 }
 
+/** 数字千分位；拿不到就返回空串 */
+function fmtNum(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toLocaleString("zh-CN") : "";
+}
+
+/** 会话详情（默认收起；只有点右侧 ▸ 才显示，里面才出现本地目录） */
+function sessionDetailHtml(s) {
+  const t = s.time || {};
+  const tok = s.tokens || {};
+  const cache = tok.cache || {};
+  const model = s.model || {};
+  const rows = [];
+  const row = (k, v) => { if (v) rows.push(`<div><b>${k}</b><span>${v}</span></div>`); };
+  row("会话", `<code>${esc(s.id)}</code>`);
+  const dir = (s.location && s.location.directory) || "";
+  row("目录", dir ? `<code>${esc(dir)}</code>` : "");
+  row("模型", model.id
+    ? esc([model.providerID, model.id].filter(Boolean).join("/"))
+      + (model.variant && model.variant !== "default" ? ` · ${esc(model.variant)}` : "")
+    : "");
+  row("创建", esc(fmtTime(t.created)));
+  row("更新", esc(fmtTime(t.updated)));
+  const parts = [];
+  if (tok.input != null) parts.push(`输入 ${fmtNum(tok.input)}`);
+  if (tok.output != null) parts.push(`输出 ${fmtNum(tok.output)}`);
+  if (tok.reasoning != null) parts.push(`思考 ${fmtNum(tok.reasoning)}`);
+  if (cache.read != null) parts.push(`缓存读 ${fmtNum(cache.read)}`);
+  row("Token", esc(parts.join(" · ")));
+  if (s.cost != null) row("花费", esc(Number(s.cost).toFixed(6)));
+  row("结果", esc(s.outcome));
+  return rows.join("") || '<div><b>详情</b><span>暂无</span></div>';
+}
+
 function renderSessions() {
   const q = $("search").value.trim().toLowerCase();
   const items = state.sessions.filter((s) => !q || (s.title || "").toLowerCase().includes(q));
@@ -109,13 +235,17 @@ function renderSessions() {
   }
   $("session-list").innerHTML = items.map((s) => {
     const active = state.current && s.id === state.current.id ? " active" : "";
-    const dir = (s.location && s.location.directory) || "";
+    const open = !!state.detailOpen[s.id];
     const when = s.time ? fmtTime(s.time.updated || s.time.created) : "";
-    return `<div class="session${active}" data-id="${esc(s.id)}" title="${esc(dir)}">
+    const tip = open ? "收起详细信息" : "展开详细信息";
+    return `<div class="session${active}" data-id="${esc(s.id)}" title="${esc(s.title || "(无标题)")}">
+      <button type="button" class="info" data-info="${esc(s.id)}"
+              title="${tip}" aria-label="${tip}">${open ? "▾" : "▸"}</button>
       <button type="button" class="del" data-del="${esc(s.id)}"
               title="删除这个会话" aria-label="删除会话">×</button>
       <span class="t">${esc(s.title || "(无标题)")}</span>
       <span class="s">${esc(when)}${s.outcome ? " · " + esc(s.outcome) : ""}</span>
+      <div class="det"${open ? "" : " hidden"}>${sessionDetailHtml(s)}</div>
     </div>`;
   }).join("");
 }
@@ -131,6 +261,7 @@ async function deleteSession(id, title) {
   if (!confirm(`删除会话「${label}」？${extra}`)) return;
   try {
     await api(`/api/session/${encodeURIComponent(id)}`, { method: "DELETE" });
+    delete state.detailOpen[id];
   } catch (err) {
     alert(`删除失败：${err.message}`);
     return;
@@ -196,7 +327,6 @@ function renderToolPart(part, key) {
 
 function renderReasoningPart(part, key, msgId) {
   const t = part.text || "";
-  if (!t.trim()) return "";
   const head = t.slice(0, 56).replace(/\s+/g, " ");
   if (part.live) {
     return `<details class="part auto-open" data-k="${esc(key)}">
@@ -204,11 +334,17 @@ function renderReasoningPart(part, key, msgId) {
       <div class="body stream"><span data-live-reasoning data-msgid="${esc(msgId)}">${esc(t)}</span></div>
     </details>`;
   }
+  if (!t.trim()) return "";
   return `<details class="part" data-k="${esc(key)}">
     <summary><span class="tag">思考</span> ${esc(head)}…</summary>
     <div class="body">${esc(t)}</div>
   </details>`;
 }
+
+/** Codex 在自定义 provider 下会把 `Warning: Model metadata for ... not found...` 当成回复正文开头，
+ *  纯噪音 —— 展示时去掉开头这一段（实时与落库都过一遍）。 */
+const MODEL_WARN_RE = /^\s*Warning: Model metadata for `[^`]*` not found\.[^\n]*\n+/i;
+function stripModelWarning(t) { return String(t ?? "").replace(MODEL_WARN_RE, ""); }
 
 function renderMessage(m) {
   const type = m.type || "assistant";
@@ -232,9 +368,9 @@ function renderMessage(m) {
       if (p.type === "text") {
         if (p.live) {
           return `<div class="text"><span data-live-text data-msgid="${esc(m.id)}">`
-            + `${renderText(p.text)}</span><span class="caret"></span></div>`;
+            + `${renderText(stripModelWarning(p.text))}</span><span class="caret"></span></div>`;
         }
-        return `<div class="text">${renderText(p.text)}</div>`;
+        return `<div class="text">${renderText(stripModelWarning(p.text))}</div>`;
       }
       if (p.type === "reasoning") return renderReasoningPart(p, key, m.id);
       if (p.type === "tool") return renderToolPart(p, key);
@@ -313,9 +449,11 @@ function liveTotal(e) {
 function liveToMessage(id, e, revealed) {
   const content = [];
   const rt = joinBucket(e.reasoning, revealed ? revealed.reasoning : null);
-  if (rt) content.push({ type: "reasoning", text: rt, live: true });
+  // ⚠ 只要收到过该类增量就生成元素（哪怕此刻"已显示字数"还是 0）——
+  //   否则 paintLiveSlot 的壳签名不变、不会重建，元素永远不出现 → 看起来"没有打字机、一次性冒出"。
+  if (rt || Object.keys(e.reasoning).length) content.push({ type: "reasoning", text: rt, live: true });
   const tt = joinBucket(e.text, revealed ? revealed.text : null);
-  if (tt) content.push({ type: "text", text: tt, live: true });
+  if (tt || Object.keys(e.text).length) content.push({ type: "text", text: tt, live: true });
   for (const t of e.tools) {
     content.push({ type: "tool", name: t.name, state: { status: t.status, input: t.input } });
   }
@@ -329,6 +467,28 @@ function liveToMessage(id, e, revealed) {
 function pendingLiveIds() {
   const known = new Set(state.messages.map((m) => m.id));
   return Object.keys(state.live).filter((id) => !known.has(id));
+}
+
+/** 取「模型刚才在想什么」的节选：优先生成中的实时缓冲，其次最后一条助手消息。
+ *  权限弹窗用它回答"为什么要这个权限"（很多 agent 不给现成原因）。 */
+function liveContextSnippet(max = 320) {
+  let out = "";
+  for (const id of Object.keys(state.live || {})) {
+    const e = state.live[id];
+    const t = joinBucket(e.reasoning || {}) || joinBucket(e.text || {});
+    if (t) out = t;
+  }
+  if (!out) {
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (!m || m.type !== "assistant") continue;
+      const parts = m.content || [];
+      out = parts.filter((p) => p.type === "reasoning").map((p) => p.text || "").join("")
+        || parts.filter((p) => p.type === "text").map((p) => p.text || "").join("");
+      if (out) break;
+    }
+  }
+  return stripModelWarning(String(out || "")).slice(-max).trim();
 }
 
 const HERO_HTML = `<div class="empty">
@@ -404,7 +564,7 @@ function paintLiveSlot() {
     const e = state.live[el.dataset.msgid];
     if (!e) return;
     const r = state.reveal[el.dataset.msgid];
-    el.innerHTML = renderText(joinBucket(e.text, r ? r.text : null));
+    el.innerHTML = renderText(stripModelWarning(joinBucket(e.text, r ? r.text : null)));
   });
   slot.querySelectorAll("[data-live-reasoning]").forEach((el) => {
     const e = state.live[el.dataset.msgid];
@@ -432,7 +592,8 @@ function revealStep() {
     for (const kind of ["text", "reasoning"]) {
       if (r[kind] < tgt[kind]) {
         const gap = tgt[kind] - r[kind];
-        r[kind] = Math.min(tgt[kind], r[kind] + Math.max(2, Math.ceil(gap / 4)));
+        // 上限 12 字/帧：ACP 的思考是"很多个小块"、到达很快，没有上限会一次跳完（看着没打字）
+        r[kind] = Math.min(tgt[kind], r[kind] + Math.max(2, Math.min(12, Math.ceil(gap / 6))));
         more = true;
       }
     }
@@ -464,8 +625,8 @@ async function openSession(id) {
   state.follow = true;
   renderAttachRow();
   $("session-title").textContent = state.current.title || "(无标题)";
-  const d = state.current.location && state.current.location.directory;
-  $("session-meta").textContent = [state.current.id, d].filter(Boolean).join("  ·  ");
+  // 会话名下面不再显示 session id / 本地路径（详情请用侧栏会话项的 ▸ 展开）
+  $("session-meta").textContent = "";
   updateModelBtn();                                  // 顶栏模型按钮跟着当前会话走
   $("input").disabled = false;
   $("btn-send").disabled = false;
@@ -489,6 +650,7 @@ async function refreshMessages() {
     const known = new Set(state.messages.map((m) => m.id));
     for (const id of Object.keys(state.live)) if (known.has(id)) delete state.live[id];
     for (const id of Object.keys(state.reveal)) if (known.has(id)) delete state.reveal[id];
+    for (const id of Object.keys(state.frozen)) if (known.has(id)) delete state.frozen[id];
     // 我发的消息：服务端已收录就撤掉本地回显（按出现次数配对，避免同文重复误删）
     if (state.pending.length) {
       const left = new Map();
@@ -585,6 +747,7 @@ async function send() {
   paintLiveSlot();
 
   try {
+    await ensureSessionModel(state.current.id);       // ★ 没有模型先补上，别让这一轮空转
     await api(`/api/session/${encodeURIComponent(state.current.id)}/prompt`, {
       method: "POST",
       body: JSON.stringify(files.length ? { text, files } : { text }),
@@ -609,7 +772,7 @@ async function newSession() {
     const dir = state.current && state.current.location && state.current.location.directory;
     const payload = { title: "新会话" };
     if (dir) payload.location = { directory: dir };
-    const def = defaultModel();
+    const def = await resolveDefaultModel();          // ★ 本地没有就取服务端默认，保证新会话一定有模型
     if (def) payload.model = def;                    // 带上前一次选的"新会话默认模型"
     let body;
     try {
@@ -619,19 +782,45 @@ async function newSession() {
     }
     const created = unwrap(body);
     await loadSessions();
-    if (created && created.id) await openSession(created.id);
+    if (created && created.id) {
+      await openSession(created.id);
+      await ensureSessionModel(created.id);           // ★ 双保险：确保新会话已绑定模型
+    }
   } catch (err) {
     alert("新建会话失败：" + err.message);
   }
 }
 
+/** 中断后立刻收起「生成中」气泡，别干等服务端终态事件（否则界面像卡住没停）。 */
+function stopLive(sid) {
+  if (!state.current || state.current.id !== sid) return;
+  // 冻结这一轮：即便还有在途的迟到增量，也不再往界面上画
+  for (const id of Object.keys(state.live)) state.frozen[id] = true;
+  state.live = {};
+  state.reveal = {};
+  liveShellSig = null;
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }   // 停掉打字机
+  renderMessages();
+}
+
 async function interrupt() {
   if (!state.current) return;
+  const sid = state.current.id;
+  const btn = $("btn-stop");
+  if (btn) btn.disabled = true;
   try {
-    await api(`/api/session/${encodeURIComponent(state.current.id)}/interrupt`,
+    await api(`/api/session/${encodeURIComponent(sid)}/interrupt`,
       { method: "POST", body: "{}" });
+    // 乐观停止：先把「生成中」收掉、给个提示，再对账一次权威消息。
+    // 若这一轮其实已经正常结束（竞态），刷新会把落库的消息显示回来，不丢内容。
+    stopLive(sid);
+    setBanner("已请求中断…");
+    setTimeout(() => refreshMessages(), 400);
+    setTimeout(() => { refreshMessages(); setBanner(""); }, 1400);
   } catch (err) {
     alert("中断失败：" + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -652,13 +841,15 @@ function scheduleSessions() {
 }
 
 /** 终态：这些事件之后才值得去取一次权威数据 */
-const TERMINAL = /^session\.(text\.ended|step\.ended|step\.streamed|tool\.success|tool\.error|execution\.succeeded|execution\.failed|inbox\.delivered|inbox\.enqueued|created|renamed)$/;
+const TERMINAL = /^session\.(text\.ended|step\.ended|step\.streamed|step\.failed|tool\.success|tool\.error|execution\.succeeded|execution\.failed|execution\.interrupted|inbox\.delivered|inbox\.enqueued|created|renamed)$/;
 
 function handleEvent(p) {
   const t = p.type || "";
   const d = p.data || {};
   const sid = d.sessionID || (d.session && d.session.id) || null;
-  const mine = !sid || !state.current || sid === state.current.id;
+  // ⚠ 没选中会话时（state.current == null）绝不能把「带会话 ID 的事件」当成本会话：
+  //   否则切到 acp 后停在"创建新会话"空状态时，后台会话的增量会被画到空状态下面。
+  const mine = !sid || (state.current && sid === state.current.id);
 
   if (t === "server.connected") { setConn("online", "已连接"); return; }
 
@@ -668,6 +859,7 @@ function handleEvent(p) {
   // ① 文本 / 思考增量 —— 直接追加，绝不重取
   if (t === "session.text.delta" || t === "session.reasoning.delta") {
     if (!mine || !d.assistantMessageID) return;
+    if (state.frozen[d.assistantMessageID]) return;    // 用户已中止这一轮：丢弃迟到的增量
     const e = liveEnsure(d.assistantMessageID);
     const bucket = t === "session.text.delta" ? e.text : e.reasoning;
     const k = d.ordinal || 0;
@@ -678,6 +870,7 @@ function handleEvent(p) {
 
   // ② 步骤开始：记录 agent / model，让「生成中」气泡有身份
   if (t === "session.step.started" && mine && d.assistantMessageID) {
+    if (state.frozen[d.assistantMessageID]) return;
     const e = liveEnsure(d.assistantMessageID);
     e.agent = d.agent || e.agent;
     e.model = (d.model && d.model.id) || e.model;
@@ -688,6 +881,7 @@ function handleEvent(p) {
 
   // ③ 工具调用
   if (t.startsWith("session.tool.") && mine && d.assistantMessageID) {
+    if (state.frozen[d.assistantMessageID]) return;
     const e = liveEnsure(d.assistantMessageID);
     if (t === "session.tool.called") {
       e.tools.push({ name: d.name || d.tool || "tool", input: d.input, status: "running" });
@@ -696,6 +890,14 @@ function handleEvent(p) {
       if (last) last.status = t === "session.tool.success" ? "completed" : "error";
     }
     scheduleLiveRender();
+    return;
+  }
+
+  // ③′ 中断：立刻收起「生成中」气泡。
+  //    服务端被中断时未必落库"半截"助手消息，只等终态刷新的话，
+  //    界面会一直停在「思考中」——看起来就像没停下来。
+  if (t === "session.execution.interrupted") {
+    if (mine) { stopLive(state.current.id); scheduleRefresh(); }
     return;
   }
 
@@ -918,22 +1120,45 @@ function initSidebar() {
   });
 }
 
-/* ---------------- 左上角名字（点击可改） ---------------- */
+/* ---------------- 左上角名字 / 小标签（点击名字可改，设置里也能改） ---------------- */
 
 const BRAND_KEY = "opencode-ui.brandName";
+const BRAND_SUB_KEY = "opencode-ui.brandSub";
 const BRAND_DEFAULT = "絵梨衣";
+const BRAND_SUB_DEFAULT = "落尽红樱君不见，轻绘梨花泪沾衣";
 
+function readBrand(key) {
+  try { return localStorage.getItem(key) || ""; } catch { return ""; }
+}
+
+/** 名字：空值 = 恢复默认「絵梨衣」，并删掉本机记录 */
 function applyBrandName(name) {
-  $("brand-name").textContent = name;
-  document.title = `${name} · OpenCode`;
-  try { localStorage.setItem(BRAND_KEY, name); } catch { /* 隐私模式忽略 */ }
+  const v = String(name ?? "").trim().slice(0, 24);
+  const use = v || BRAND_DEFAULT;
+  $("brand-name").textContent = use;
+  document.title = `${use} · OpenCode`;
+  try {
+    if (v) localStorage.setItem(BRAND_KEY, v);
+    else localStorage.removeItem(BRAND_KEY);
+  } catch { /* 隐私模式忽略 */ }
+}
+
+/** 小标签：空值 = 恢复默认题词，并删掉本机记录 */
+function applyBrandSub(sub) {
+  const v = String(sub ?? "").trim().slice(0, 40);
+  const use = v || BRAND_SUB_DEFAULT;
+  const el = $("brand-sub");
+  if (el) el.textContent = use;
+  try {
+    if (v) localStorage.setItem(BRAND_SUB_KEY, v);
+    else localStorage.removeItem(BRAND_SUB_KEY);
+  } catch { /* 隐私模式忽略 */ }
 }
 
 function initBrandName() {
   const el = $("brand-name");
-  let saved = "";
-  try { saved = localStorage.getItem(BRAND_KEY) || ""; } catch { /* ignore */ }
-  if (saved) applyBrandName(saved);
+  applyBrandName(readBrand(BRAND_KEY));                 // 没有记录时就是 BRAND_DEFAULT
+  applyBrandSub(readBrand(BRAND_SUB_KEY));
 
   el.addEventListener("click", () => {
     if (el.isContentEditable) return;
@@ -954,9 +1179,7 @@ function initBrandName() {
     if (e.key === "Enter") { e.preventDefault(); el.blur(); }
     if (e.key === "Escape") {
       e.preventDefault();
-      let cur = BRAND_DEFAULT;
-      try { cur = localStorage.getItem(BRAND_KEY) || BRAND_DEFAULT; } catch { /* ignore */ }
-      el.textContent = cur;
+      el.textContent = readBrand(BRAND_KEY) || BRAND_DEFAULT;
       el.blur();
     }
   });
@@ -971,6 +1194,14 @@ const MAX_EDGE = 1600;
 const MAX_ATTACH_COUNT = 8;
 
 let attachSeq = 0;
+
+/** 附件真实 mime 缺失时（某些粘贴来源 type 为空）按扩展名猜一个 */
+function guessMime(name) {
+  const ext = (String(name || "").toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || "";
+  return { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+           webp: "image/webp", bmp: "image/bmp", avif: "image/avif" }[ext]
+    || "application/octet-stream";
+}
 
 function humanSize(n) {
   if (n < 1024) return `${n} B`;
@@ -1010,7 +1241,9 @@ async function addFiles(fileList) {
       break;
     }
     let file = original;
-    if ((file.type || "").startsWith("image/")) {
+    const looksImage = (file.type || "").startsWith("image/")
+      || /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(file.name || "");
+    if (looksImage) {
       try { file = await shrinkImage(file); } catch { /* 压缩失败就用原图 */ }
     }
     if (file.size > MAX_ATTACH_BYTES) {
@@ -1027,7 +1260,7 @@ async function addFiles(fileList) {
     state.attachments.push({
       id: `att_${++attachSeq}`,
       name: file.name || "粘贴的图片.jpg",
-      mime: file.type || "application/octet-stream",
+      mime: file.type || guessMime(file.name),
       size: file.size,
       dataUrl,
     });
@@ -1041,14 +1274,29 @@ function renderAttachRow() {
   const list = state.attachments;
   row.hidden = !list.length;
   row.innerHTML = list.map((a) => {
-    const isImg = /^image\//.test(a.mime);
+    const isImg = /^image\//.test(a.mime) || /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(a.name || "");
     const thumb = isImg
       ? `<img class="thumb" src="${esc(a.dataUrl)}" alt="">`
       : `<span class="thumb">📄</span>`;
-    return `<span class="attach" data-id="${esc(a.id)}">${thumb}`
+    return `<span class="attach" data-id="${esc(a.id)}" data-mime="${esc(a.mime || "")}"`
+      + ` data-src="${esc(a.dataUrl || "")}" title="${isImg ? "点击预览大图" : ""}">${thumb}`
       + `<span class="meta"><b>${esc(a.name)}</b><i>${humanSize(a.size)}</i></span>`
       + `<button type="button" class="rm" title="移除">×</button></span>`;
   }).join("");
+}
+
+/** 图片大图预览（附件缩略图 / 消息里的图片都可以点开） */
+function openImageView(src) {
+  const box = $("img-view"), img = $("img-view-img");
+  if (!box || !img || !src) return;
+  img.src = src;
+  box.hidden = false;
+}
+function closeImageView() {
+  const box = $("img-view"), img = $("img-view-img");
+  if (!box) return;
+  box.hidden = true;
+  if (img) img.src = "";
 }
 
 function initAttachments() {
@@ -1060,10 +1308,30 @@ function initAttachments() {
 
   $("attach-row").addEventListener("click", (e) => {
     const btn = e.target.closest(".rm");
-    if (!btn) return;
-    const id = btn.closest(".attach").dataset.id;
-    state.attachments = state.attachments.filter((a) => a.id !== id);
-    renderAttachRow();
+    if (btn) {
+      const id = btn.closest(".attach").dataset.id;
+      state.attachments = state.attachments.filter((a) => a.id !== id);
+      renderAttachRow();
+      return;
+    }
+    const chip = e.target.closest(".attach");
+    if (chip && /^image\//.test(chip.dataset.mime || "")) openImageView(chip.dataset.src || "");
+  });
+
+  // 图片大图预览：点消息里的图片打开；点遮罩 / × / Esc 关闭
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest("a.shot");
+    if (a) { e.preventDefault(); openImageView(a.getAttribute("href") || ""); return; }
+    const box = $("img-view");
+    if (box && !box.hidden && (e.target === box
+        || (e.target.closest && e.target.closest("#img-view-close")))) {
+      closeImageView();
+    }
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const box = $("img-view");
+    if (box && !box.hidden) closeImageView();
   });
 
   // 粘贴图片（截图后直接 Ctrl+V）
@@ -1326,18 +1594,44 @@ function pickEven(arr, n) {
 
 /** 音频条：展开时在播放条里（#p-vis），收起侧栏时在输入框上方（#vis-bar）。
  *  数据优先用真频谱（系统回环，任何声音都会跳）；拿不到就退回 CSS 合成动画。 */
+/** 横向条：柱高 = 频谱值 */
+function paintBars(box, values, min) {
+  if (!box || !values || !values.length) return;
+  buildVis(box, values.length);
+  [...box.children].forEach((el, i) => {
+    el.style.height = visHeight(values[i], min) + "%";
+  });
+}
+
+/** 会话区两侧：纵向堆叠的横条，宽度 = 频谱值 × 起伏倍数（左贴左、右贴右）。
+ *  倍数来自设置「音频条起伏」（20–300%，默认 120%）；倍数越大柱子伸得越远。 */
+function paintSides(values) {
+  if (!values || !values.length) return;
+  const gain = Math.max(0.2, Math.min(3.0, (Number(SET.spectrumSidesGain) || 120) / 100));
+  ["spec-left", "spec-right"].forEach((id) => {
+    const box = $(id);
+    if (!box) return;
+    buildVis(box, values.length);
+    [...box.children].forEach((el, i) => {
+      el.style.width = Math.min(100, visHeight(values[i], 4) * gain) + "%";
+    });
+  });
+}
+
 async function drawSpectrum() {
   const bar = $("player");
   const vis = $("vis-bar");
   const collapsed = document.documentElement.dataset.sidebar === "closed";
-  const box = collapsed ? vis : $("p-vis");
-  if (!box) return;
   const playing = musicPlaying();
-  // 收起后播放条不显示，采样改由上面那条承担 → 收起时也持续采（静音时自然落到近零）
-  const active = MUSIC.real && (collapsed || (playing && bar.classList.contains("on")));
-  bar.classList.toggle("real", active && !collapsed);
-  vis.classList.toggle("real", active && collapsed);
-  vis.classList.toggle("playing", collapsed && playing);
+  const sidesOn = document.documentElement.classList.contains("spec-sides");
+  // 三个目标：播放条里的 p-vis、收起时输入框上方的 vis-bar、会话区两侧的 spec-*
+  const activePlayer = MUSIC.real && !collapsed && playing && bar.classList.contains("on");
+  const activeVis = MUSIC.real && collapsed;
+  const activeSides = MUSIC.real && !collapsed && sidesOn;
+  const active = activePlayer || activeVis || activeSides;
+  bar.classList.toggle("real", activePlayer);
+  vis.classList.toggle("real", activeVis);
+  vis.classList.toggle("playing", activeVis && playing);
   if (!active || spectrumBusy) return;
   if (!playing) {                                  // 没在放歌时降频，别 70ms 打一次接口
     const now = Date.now();
@@ -1349,12 +1643,9 @@ async function drawSpectrum() {
     const r = await api("/qq/spectrum");
     const bars = (r && r.bars) || [];
     if (!bars.length) return;
-    const series = box === vis ? bars : pickEven(bars, 12);   // 播放条那条抽稀，别糊成一片
-    buildVis(box, series.length);
-    const min = box === vis ? 5 : 8;   // 播放条里那条更矮，抬头给足一点
-    [...box.children].forEach((el, i) => {
-      el.style.height = visHeight(series[i], min) + "%";
-    });
+    if (activeVis) paintBars(vis, bars, 5);
+    if (activePlayer) paintBars($("p-vis"), pickEven(bars, 12), 8);
+    if (activeSides) paintSides(bars);
   } catch { /* 拿不到就继续用合成动画 */ } finally {
     spectrumBusy = false;
   }
@@ -1383,11 +1674,12 @@ function initMusic() {
   });
   $("p-shuffle").addEventListener("click", () => {
     MUS.shuffle = !MUS.shuffle;
+    MUS.bag = [];                          // 重开随机：重新洗一轮
     updatePlayModeButtons();
     saveMusicState();
   });
   $("p-loop").addEventListener("click", () => {
-    MUS.loop = !MUS.loop;
+    MUS.loop = MUS.loop === "off" ? "all" : (MUS.loop === "all" ? "one" : "off");
     updatePlayModeButtons();
     saveMusicState();
   });
@@ -1421,10 +1713,9 @@ function initMusic() {
   // 条内搜索 = 和「乐」弹窗同一套（搜到即点播，走面板内播放）
   $("p-search-btn").addEventListener("click", () => {
     const box = $("p-search");
-    const res = $("p-results");
     const show = box.hidden;
     box.hidden = !show;
-    res.hidden = true;                     // 结果区跟着一起收起（重开时是干净的）
+    hideBarResults();                      // 结果区跟着收起（重开时是干净的）
     if (show) $("p-q").focus();
   });
   $("p-q-go").addEventListener("click", () => musicSearch($("p-q").value));
@@ -1432,7 +1723,37 @@ function initMusic() {
     if (e.key === "Enter") { e.preventDefault(); musicSearch($("p-q").value); }
   });
   $("p-results").addEventListener("click", (e) => {
+    if (e.target.closest("[data-close]")) { hideBarResults(); return; }
+    const pl = e.target.closest(".it[data-pl]");
+    if (pl) { musicPlaylistOpen(pl.dataset.pl, pl.dataset.name); return; }
     const it = e.target.closest(".it[data-play]");
+    if (it) musicPlay(it.dataset.play);
+  });
+  $("p-lib").addEventListener("click", () => {
+    const box = $("p-results");
+    if (MUS.view === "playlists" && box && !box.hidden) { hideBarResults(); return; }  // 再点一次收起
+    musicPlaylists();
+  });
+
+  // 音乐主页（全页）
+  $("p-home").addEventListener("click", openMusicHome);
+  $("p-queue").addEventListener("click", () => {
+    const box = $("p-results");
+    if (MUS.view === "queue" && box && !box.hidden) { hideBarResults(); return; }  // 再点一次收起
+    renderQueue();
+  });
+  $("mus-close").addEventListener("click", closeMusicHome);
+  $("mus-go").addEventListener("click", () => musicSearch($("mus-q").value));
+  $("mus-q").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); musicSearch($("mus-q").value); }
+  });
+  document.querySelectorAll("#mus-home .mus-nav-i").forEach((b) => {
+    b.addEventListener("click", () => setHomeView(b.dataset.view));
+  });
+  $("mus-songs").addEventListener("click", (e) => {
+    const pl = e.target.closest(".mus-pl[data-pl]");
+    if (pl) { musicPlaylistOpen(pl.dataset.pl, pl.dataset.name); return; }
+    const it = e.target.closest(".mus-song[data-play]");
     if (it) musicPlay(it.dataset.play);
   });
 
@@ -1459,6 +1780,8 @@ function initMusic() {
     if (document.documentElement.classList.contains("lyrics-on")) highlightLyrics();
   }, 250);
   buildVis($("vis-bar"), VIS_WEIGHT);                    // 收起侧栏时输入框上方那条先摆好柱子
+  buildVis($("spec-left"), VIS_WEIGHT);                  // 会话区左右两侧的真频谱先摆好柱子
+  buildVis($("spec-right"), VIS_WEIGHT);
   setInterval(drawSpectrum, 70);                         // 真频谱：70ms 一帧
   updatePlayModeButtons();
 
@@ -1469,7 +1792,7 @@ function initMusic() {
  * 这两类交互原本只由官方客户端弹窗 —— 自建界面不实现的话 agent 会被静默卡住，
  * 而本项目还会最小化官方窗口，用户根本看不到。 */
 
-const ASK = { form: null, perm: null, picks: {}, sig: "" };
+const ASK = { form: null, perm: null, picks: {}, sig: "", banner: "" };
 
 function askHide() {
   $("ask").hidden = true;
@@ -1488,7 +1811,12 @@ function fieldHtml(f) {
     const opts = f.options.map((o) => `<button type="button" class="ask-opt"`
       + ` data-key="${k}" data-value="${esc(o.value)}"${multi ? ' data-multi="1"' : ""}`
       + ` title="${esc(o.description || "")}">${esc(o.label)}</button>`).join("");
-    return `<div class="ask-field">${head}<div class="ask-opts">${opts}</div></div>`;
+    // ★ custom=true：允许"自己说" —— 选项下面补一个文本框，填了就以它为准
+    const custom = f.custom
+      ? `<input type="text" class="ask-custom" data-key="${k}" data-custom="1"`
+        + ` placeholder="自己说…（填这里就以它为准）">`
+      : "";
+    return `<div class="ask-field">${head}<div class="ask-opts">${opts}</div>${custom}</div>`;
   }
   if (f.type === "boolean") {
     return `<div class="ask-field">${head}<div class="ask-opts">`
@@ -1539,8 +1867,30 @@ function renderAsk(forms, perms) {
     $("ask-kind").textContent = "权限请求";
     $("ask-title").textContent = perm.action || "需要授权";
     const res = (perm.resources || []).map((r) => `<li>${esc(r)}</li>`).join("");
+    // 说明「为什么要这个权限」：优先用接口给的原因（ACP 的 _meta / OpenCode 的 message），
+    // 没有就按 action + 涉及资源合成一段；再补「模型刚才在想什么」作为背景（任何引擎都适用）。
+    let why = String(perm.message || "").trim();
+    if (!why) {
+      const list = (perm.resources || []).slice(0, 4).join("、");
+      why = "请求权限：" + (perm.action || "工具调用") + (list ? "；涉及：" + list : "") + "。";
+    }
+    let metaTxt = "";
+    if (perm.metadata && typeof perm.metadata === "object") {
+      const ks = Object.keys(perm.metadata);
+      if (ks.length) {
+        metaTxt = ks.slice(0, 6).map((k) => {
+          const v = perm.metadata[k];
+          const s = (v && typeof v === "object") ? JSON.stringify(v) : String(v);
+          return k + " = " + String(s || "").slice(0, 160);
+        }).join("\n");
+      }
+    }
+    const ctx = /背景（/.test(perm.detail || "") ? "" : liveContextSnippet(320);
     $("ask-body").innerHTML =
-      (perm.message ? `<div class="d">${esc(perm.message)}</div>` : "")
+      `<div class="d">${esc(why)}</div>`
+      + (perm.detail ? `<div class="d ask-why">${esc(perm.detail)}</div>` : "")
+      + (metaTxt ? `<div class="d ask-why">${esc(metaTxt)}</div>` : "")
+      + (ctx ? `<div class="d ask-why">背景（模型刚才的想法节选）：${esc(ctx)}</div>` : "")
       + (res ? `<ul class="ask-res">${res}</ul>` : "");
     $("ask-actions").innerHTML =
       `<span id="ask-msg" class="ask-msg"></span>`
@@ -1554,6 +1904,7 @@ function renderAsk(forms, perms) {
     $("ask-title").textContent = form.title || "请选择";
     $("ask-body").innerHTML = (form.fields || []).filter((f) => !f.hidden).map(fieldHtml).join("");
     $("ask-actions").innerHTML = `<span id="ask-msg" class="ask-msg"></span>`
+      + `<button id="ask-ignore">忽略</button>`
       + `<button id="ask-submit" class="primary">确定</button>`;
   }
   $("ask").hidden = false;
@@ -1572,6 +1923,19 @@ function collectAnswer(form) {
   const answer = {};
   for (const f of (form.fields || [])) {
     if (f.hidden) continue;
+    // ★ "自己说"（custom）：文本框有内容就以它为准
+    const cin = body.querySelector(`input.ask-custom[data-key="${CSS.escape(f.key)}"]`);
+    if (cin && cin.value.trim() !== "") {
+      const v = cin.value.trim();
+      if (f.type === "multiselect") {
+        const picked = Array.isArray(ASK.picks[f.key]) ? ASK.picks[f.key].slice() : [];
+        picked.push(v);
+        answer[f.key] = picked;
+      } else {
+        answer[f.key] = coerce(f, v);
+      }
+      continue;
+    }
     const picked = ASK.picks[f.key];
     const hasPicked = Array.isArray(picked) ? picked.length > 0
       : (picked !== undefined && picked !== "");
@@ -1587,20 +1951,31 @@ function collectAnswer(form) {
   return answer;
 }
 
-/** 提交表单。失败原因直接写在弹窗里（不用 alert，方便复制排查） */
-async function submitAsk() {
+/** 弹窗里回一句话；isErr=true 时标红，并同步到顶部横幅（弹窗被轮询关掉也看得到）。 */
+function askMsg(text, isErr) {
   const msg = $("ask-msg");
-  const say = (t) => { if (msg) msg.textContent = t; };
-  if (!ASK.form) { say("内部错误：没有待提交的表单"); return; }
+  if (msg) { msg.textContent = text; msg.classList.toggle("err", !!isErr); }
+  if (isErr) { ASK.banner = text; setBanner(text); }
+  return text;
+}
+
+/** 清掉"因为 ask 提示"挂上的横幅（不碰连接状态等无关横幅）。 */
+function askClearBanner() {
+  if (ASK.banner) { ASK.banner = ""; setBanner(""); }
+}
+
+/** 提交表单。失败原因直接写在弹窗里（并同步到横幅，方便复制排查） */
+async function submitAsk() {
+  if (!ASK.form) { askMsg("内部错误：没有待提交的表单", true); return; }
   const form = ASK.form;
   const answer = collectAnswer(form);
   const missing = (form.fields || []).filter((f) => !f.hidden && f.required
     && (answer[f.key] === undefined || answer[f.key] === ""));
   if (missing.length) {
-    say(`还差：${missing.map((f) => f.title || f.key).join("、")}`);
+    askMsg(`还差：${missing.map((f) => f.title || f.key).join("、")}`, true);
     return;
   }
-  say("提交中…");
+  askMsg("提交中…");
   const url = `/api/session/${encodeURIComponent(form.sessionID)}`
     + `/form/${encodeURIComponent(form.id)}/reply`;
   try {
@@ -1610,13 +1985,41 @@ async function submitAsk() {
     });
     if (!res.ok) {
       const t = await res.text();
-      say(`提交失败 ${res.status}：${t.slice(0, 200)}`);
+      if (res.status === 404 || res.status === 409) {      // 已失效 / 已结算
+        askMsg(`该选择请求已失效（${res.status}），已刷新`, true);
+        askHide();
+        pollAsks();
+        return;
+      }
+      askMsg(`提交失败 ${res.status}：${t.slice(0, 200)}`, true);
       return;
     }
+    askClearBanner();
     askHide();
     pollAsks();
   } catch (err) {
-    say(`提交异常：${err.message}`);
+    askMsg(`提交异常：${err.message}`, true);
+  }
+}
+
+/** 忽略一个待处理的表单（DELETE → 取消，不回答）。失败会在弹窗 + 横幅提示。 */
+async function ignoreForm() {
+  if (!ASK.form) return;
+  const form = ASK.form;
+  try {
+    const res = await fetch(`/api/session/${encodeURIComponent(form.sessionID)}`
+      + `/form/${encodeURIComponent(form.id)}`, { method: "DELETE" });
+    if (!res.ok && res.status !== 404) {
+      const t = await res.text();
+      askMsg(`忽略失败 ${res.status}：${t.slice(0, 160)}`, true);
+      return;
+    }
+    setBanner("已忽略该请求");
+    ASK.banner = "已忽略该请求";
+    askHide();
+    pollAsks();
+  } catch (err) {
+    askMsg(`忽略异常：${err.message}`, true);
   }
 }
 
@@ -1654,23 +2057,49 @@ function initAsk() {
         .forEach((x) => x.classList.remove("sel"));
       b.classList.add("sel");
       ASK.picks[key] = val;                             // 单选：记账
+      // 选了选项 → 清掉同字段的"自己说"（以最后一次操作为准）
+      const ci = $("ask-body").querySelector(`input.ask-custom[data-key="${CSS.escape(key)}"]`);
+      if (ci) ci.value = "";
     }
     if (e.detail >= 2) submitAsk();                      // 选项上双击 = 直接提交
   });
 
+  // "自己说"输入框：一开始输入就取消该字段的选项选择（以最后一次操作为准）
+  $("ask-body").addEventListener("input", (e) => {
+    const ci = e.target.closest("input.ask-custom");
+    if (!ci) return;
+    const key = ci.dataset.key;
+    if (ci.value.trim() !== "") {
+      $("ask-body").querySelectorAll(`.ask-opt[data-key="${CSS.escape(key)}"]`)
+        .forEach((x) => x.classList.remove("sel"));
+      ASK.picks[key] = "";
+    }
+  });
+
   $("ask-actions").addEventListener("click", async (e) => {
+    if (e.target.closest("#ask-ignore")) { ignoreForm(); return; }
     const dec = e.target.closest("[data-dec]");
     if (dec && ASK.perm) {
       const perm = ASK.perm;
-      const say = (t) => { const m = $("ask-msg"); if (m) m.textContent = t; };
       try {
         const res = await fetch(`/api/session/${encodeURIComponent(perm.sessionID)}`
           + `/permission/${encodeURIComponent(perm.id)}/reply`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ decision: dec.dataset.dec }),
         });
-        if (!res.ok) { say(`回复失败 ${res.status}`); return; }
-      } catch (err) { say(`回复异常：${err.message}`); return; }
+        if (!res.ok) {
+          const t = await res.text();
+          if (res.status === 404 || res.status === 409) {    // 已失效 / 已处理
+            askMsg(`该权限请求已失效（${res.status}），已刷新`, true);
+            askHide();
+            pollAsks();
+            return;
+          }
+          askMsg(`回复失败 ${res.status}：${t.slice(0, 160)}`, true);
+          return;
+        }
+      } catch (err) { askMsg(`回复异常：${err.message}`, true); return; }
+      askClearBanner();
       askHide();
       pollAsks();
       return;
@@ -1702,7 +2131,8 @@ let liveApply = null;           // initLiveBg 里赋值：设置一变就立刻�
 const SET_KEY = "opencode-ui.settings";
 const SET_DEFAULT = {
   dimHiru: 100, dimYoru: 80, blur: 18, rate: 80,
-  live: true, taskbar: true, petals: true, zh: true,
+  live: true, taskbar: true, spectrumSides: true, spectrumSidesH: 100, spectrumSidesGain: 120,
+  petals: true, zh: true,
 };
 const SET = Object.assign({}, SET_DEFAULT);
 
@@ -1738,7 +2168,15 @@ function applySettings() {
   liveRate = Math.min(1.3, Math.max(0.5, SET.rate / 100));
   document.body.classList.toggle("no-petals", !SET.petals);
   document.body.classList.toggle("no-lyrics-zh", !SET.zh);   // 歌词翻译：关掉就不显示小字译文
+  document.documentElement.classList.toggle("spec-sides", !!SET.spectrumSides);
+  root.style.setProperty("--spec-side-h", Math.max(20, Math.min(100, Number(SET.spectrumSidesH) || 100)) + "%");
+  root.style.setProperty("--spec-side-gain", String(Math.max(20, Math.min(300, Number(SET.spectrumSidesGain) || 120))));
+  ["cfg-spec-sides-h", "cfg-spec-sides-gain"].forEach((id) => {
+    const row = $(id);
+    if (row) row.hidden = !SET.spectrumSides;             // 只有开启两侧音频条才显示子项
+  });
   if (liveApply) liveApply();
+  if (typeof drawSpectrum === "function") drawSpectrum();    // 开关后立刻画一次两侧音频条
   syncTaskbarPref();                                         // 通知守护进程：任务栏是否隐藏
 }
 
@@ -1750,6 +2188,321 @@ function setSetting(key, value) {
   renderSettings();
 }
 
+/* ---------------- 对话引擎（后端 /engine）---------------- */
+
+const ENGINE = { active: "", available: [] };
+
+/** 拉取可用引擎并填充设置里的下拉；老后端没这些接口就优雅降级（禁用 + 说明） */
+async function loadEngineStatus() {
+  const sel = $("cfg-engine");
+  if (!sel) return;
+  const note = $("cfg-engine-note");
+  try {
+    const st = await api("/engine/status");
+    ENGINE.available = (st && st.available) || [];
+    ENGINE.active = (st && st.active) || "";
+    sel.innerHTML = ENGINE.available.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
+    sel.value = ENGINE.active;
+    sel.disabled = ENGINE.available.length < 2;
+    if (note) {
+      note.textContent = ENGINE.available.length
+        ? `当前：${ENGINE.active}${ENGINE.available.length < 2 ? "（仅此一个可选）" : ""}`
+        : "后端没有注册任何引擎";
+    }
+  } catch {
+    ENGINE.available = []; ENGINE.active = "";
+    sel.innerHTML = "<option>不可用</option>";
+    sel.disabled = true;
+    if (note) note.textContent = "当前面板服务不支持引擎切换（重启后端后可用）";
+  }
+  loadAcpAgents();
+}
+
+/** 切换引擎：POST /engine，再清空当前会话并重载列表（不同引擎的会话不通用） */
+async function setEngine(id) {
+  if (!id || id === ENGINE.active) return;
+  const sel = $("cfg-engine");
+  if (sel) sel.disabled = true;
+  try {
+    await api("/engine", { method: "POST", body: JSON.stringify({ engine: id }) });
+    setBanner(`已切换对话引擎：${id}`);
+    // 换引擎 = 换后端：清空当前会话与消息区，并重连 SSE。
+    // ⚠ /api/event 在「连接那一刻」就绑定了当时的引擎；不重连会一直收到旧引擎的事件。
+    state.current = null;
+    state.messages = [];
+    state.live = {};
+    state.reveal = {};
+    state.pending = [];
+    state.attachments = [];
+    staticSig = null;
+    liveShellSig = null;
+    heroShown = false;
+    renderAttachRow();
+    $("session-title").textContent = "未选择会话";
+    $("session-meta").textContent = "";
+    $("input").disabled = true;
+    $("btn-send").disabled = true;
+    $("btn-stop").disabled = true;
+    renderMessages();
+    if (typeof connectEvents === "function") connectEvents();
+    await loadSessions();
+    // 换引擎后像开机一样自动打开最近一个会话，别停留在"未选择会话"空状态
+    // （否则期间若有 SSE 事件会被误画到空状态下面）。
+    if (state.sessions.length && !state.current) {
+      await openSession(state.sessions[0].id);
+    }
+  } catch (err) {
+    alert("切换引擎失败：" + err.message);
+  }
+  await loadEngineStatus();
+}
+
+/* ---------------- ACP agentlist（/engine/acp/agents）---------------- */
+
+const ACP = { active: "", list: [] };
+
+async function loadAcpAgents() {
+  try {
+    const r = await api("/engine/acp/agents");
+    ACP.active = (r && r.active) || "";
+    ACP.list = (r && r.agents) || [];
+  } catch {
+    ACP.active = ""; ACP.list = [];
+  }
+  updateAcpRow();
+  renderAgents();
+}
+
+function updateAcpRow() {
+  const row = $("cfg-acp-row"), note = $("cfg-acp-note"), btn = $("cfg-acp-btn");
+  if (!row) return;
+  row.hidden = ENGINE.active !== "acp";
+  const a = ACP.list.find((x) => x.id === ACP.active);
+  if (btn) btn.textContent = a ? a.label : "选择 agent…";   // 按钮直接显示"当前用的是哪个"
+  if (!note) return;
+  note.textContent = a
+    ? `当前使用：${a.label}${a.available ? "" : "（缺：" + ((a.missing || []).join("、") || "依赖") + "）"} · 点右侧更换或新增`
+    : "选择要驱动的 agent（Codex / dsh / …）";
+}
+
+function renderAgents() {
+  const box = $("agents-list");
+  if (!box) return;
+  const cur = $("agents-cur");
+  if (cur) cur.textContent = ACP.active ? `当前：${ACP.active}` : "（没有 agent）";
+  if (!ACP.list.length) {
+    box.innerHTML = `<div class="muted" style="padding:10px">拿不到 agent 列表（后端需支持 /engine/acp/agents）</div>`;
+    return;
+  }
+  box.innerHTML = ACP.list.map((a) => {
+    const canDel = !a.builtin && a.id !== ACP.active;
+    return `<div class="agents-row${a.id === ACP.active ? " on" : ""}" data-aid="${esc(a.id)}"`
+      + ` title="${esc((a.command || []).join(" ") + (a.cwd ? "\n" + a.cwd : ""))}">`
+      + `<div class="an"><span class="dot${a.available ? " ok" : ""}"></span>${esc(a.label)}`
+      + `<span class="muted" style="font-size:11px">${esc(a.id)}</span>`
+      + `<span class="muted" style="font-size:11px;margin-left:auto">`
+      + `${a.available ? "可用" : esc("缺：" + ((a.missing || []).join("、") || "依赖"))}</span>`
+      + (canDel ? `<button type="button" class="p-x" data-del="${esc(a.id)}" title="删除这个 agent">×</button>` : "")
+      + `</div>`
+      + (a.note ? `<div class="ab">${esc(a.note)}</div>` : "")
+      + `</div>`;
+  }).join("");
+}
+
+/* ---------------- 新增 ACP agent：先列「发现的新 agent」，再退到「选文件夹」 ---------------- */
+
+const ANEW = { list: [] };
+
+function openAgentsNew() {
+  $("agents-new").hidden = false;
+  renderCandidates();
+  loadCandidates();
+}
+function closeAgentsNew() { $("agents-new").hidden = true; }
+
+async function loadCandidates() {
+  const cur = $("anew-cur");
+  if (cur) cur.textContent = "扫描中…";
+  try {
+    const r = await api("/engine/acp/agents", { method: "POST",
+      body: JSON.stringify({ action: "candidates" }) });
+    ANEW.list = (r && r.candidates) || [];
+  } catch { ANEW.list = []; }
+  renderCandidates();
+}
+
+function renderCandidates() {
+  const box = $("anew-list"), cur = $("anew-cur");
+  if (!box) return;
+  if (cur) cur.textContent = ANEW.list.length
+    ? `发现 ${ANEW.list.length} 个可添加的 agent（点一下就加进来）`
+    : "没有自动发现新的 agent";
+  if (!ANEW.list.length) {
+    box.innerHTML = `<div class="muted" style="padding:10px">`
+      + `没自动发现新 agent —— 用下面的「选择文件夹…」指向它的目录。</div>`;
+    return;
+  }
+  box.innerHTML = ANEW.list.map((c) => `<div class="agents-row" data-cid="${esc(c.id)}"`
+    + ` title="${esc((c.command || []).join(" ") + (c.dir ? "\n" + c.dir : ""))}">`
+    + `<div class="an"><span class="dot${c.available ? " ok" : ""}"></span>${esc(c.label)}`
+    + `<span class="muted" style="font-size:11px">${esc(c.id)}</span>`
+    + `<span class="muted" style="font-size:11px;margin-left:auto">`
+    + `${c.available ? "可直接用" : esc("缺：" + ((c.missing || []).join("、") || "依赖"))}</span></div>`
+    + (c.note ? `<div class="ab">${esc(c.note)}</div>` : "")
+    + `</div>`).join("");
+}
+
+async function addCandidate(cid) {
+  const c = ANEW.list.find((x) => x.id === cid);
+  if (!c) return;
+  try {
+    const r = await api("/engine/acp/agents", { method: "POST",
+      body: JSON.stringify({ action: "add", label: c.label, command: c.command,
+                             cwd: c.cwd || "", note: c.note || "", activate: false }) });
+    ANEW.list = ANEW.list.filter((x) => x.id !== cid);
+    ACP.list = (r && r.agents) || ACP.list;
+    ACP.active = (r && r.active) || ACP.active;
+    setBanner(`已添加 agent：${c.label}（回上一页点卡片即可切换）`);
+    renderCandidates();
+    renderAgents();
+    updateAcpRow();
+  } catch (err) { setBanner("添加失败：" + err.message); }
+}
+
+/** 没发现 → 打开 Windows 文件夹选择框，指到 agent 目录，由后端推断启动命令。 */
+async function addFromFolder() {
+  const btn = $("anew-folder");
+  if (btn) { btn.disabled = true; btn.textContent = "选择中…"; }
+  try {
+    const p = await api("/live/root/pick", { method: "POST", body: "{}" });
+    if (!p || !p.ok) {
+      setBanner(p && p.canceled ? "已取消选择" : "选择文件夹失败");
+      return;
+    }
+    const r = await api("/engine/acp/agents", { method: "POST",
+      body: JSON.stringify({ action: "add-folder", dir: p.path, activate: false }) });
+    ACP.list = (r && r.agents) || ACP.list;
+    ACP.active = (r && r.active) || ACP.active;
+    setBanner(`已从文件夹添加：${r.added}${r.note ? "（" + r.note + "）" : ""}`);
+    closeAgentsNew();
+    renderAgents();
+    updateAcpRow();
+  } catch (err) {
+    setBanner("添加失败：" + (err && err.message ? err.message : err));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "选择文件夹…"; }
+  }
+}
+
+async function delAgent(id) {
+  if (!id) return;
+  if (!confirm(`删除 agent「${id}」？`)) return;
+  try {
+    const r = await api("/engine/acp/agents", { method: "POST",
+      body: JSON.stringify({ action: "delete", id }) });
+    ACP.list = (r && r.agents) || ACP.list;
+    if (ACP.active === id) ACP.active = (r && r.active) || ACP.active;
+    setBanner(`已删除 agent：${id}`);
+    updateAcpRow();
+    renderAgents();
+  } catch (err) { setBanner("删除失败：" + err.message); }
+}
+
+async function detectAgents() {
+  const btn = $("agents-detect");
+  if (btn) { btn.disabled = true; btn.textContent = "检测中…"; }
+  try {
+    const r = await api("/engine/acp/agents", { method: "POST", body: JSON.stringify({ action: "detect" }) });
+    ACP.active = (r && r.active) || ACP.active;
+    ACP.list = (r && r.agents) || ACP.list;
+    const found = ACP.list.filter((x) => x.available).length;
+    setBanner(`已自动检测 agent 位置（可用 ${found}/${ACP.list.length}）`);
+    updateAcpRow();
+    renderAgents();
+  } catch (err) {
+    setBanner("自动检测失败：" + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "自动检测"; }
+  }
+}
+
+let AGENTS_BACK_TO_CFG = false;
+function openAgents() {
+  AGENTS_BACK_TO_CFG = !$("cfg").hidden;      // 从设置里进来的 → 把设置收起，专心选 agent
+  $("cfg").hidden = true;
+  $("agents").hidden = false;
+  renderAgents();
+  loadAcpAgents();
+}
+function closeAgents() {
+  $("agents").hidden = true;
+  if (AGENTS_BACK_TO_CFG) $("cfg").hidden = false;   // 关掉 agentlist 回到设置
+  AGENTS_BACK_TO_CFG = false;
+}
+
+/** 换 ACP agent 后：旧会话属于旧 agent，必须清空界面 + 重连 SSE
+ *（否则拿旧 sessionId 去 prompt，对方回 -32603 Session not found）。 */
+async function resetAfterAgentSwitch(msg) {
+  setBanner(msg);
+  state.current = null;
+  state.messages = [];
+  state.live = {};
+  state.reveal = {};
+  state.pending = [];
+  state.attachments = [];
+  staticSig = null;
+  liveShellSig = null;
+  heroShown = false;
+  renderAttachRow();
+  $("session-title").textContent = "未选择会话";
+  $("session-meta").textContent = "";
+  $("input").disabled = true;
+  $("btn-send").disabled = true;
+  $("btn-stop").disabled = true;
+  renderMessages();
+  if (typeof connectEvents === "function") connectEvents();
+  await loadSessions();
+  if (state.sessions.length && !state.current) await openSession(state.sessions[0].id);
+}
+
+async function pickAgent(id) {
+  const prev = ACP.active;
+  try {
+    const r = await api("/engine/acp/agents", { method: "POST", body: JSON.stringify({ id }) });
+    ACP.active = (r && r.active) || id;
+    ACP.list = (r && r.agents) || ACP.list;
+    updateAcpRow();
+    renderAgents();
+    if (prev !== ACP.active && ENGINE.active === "acp") {
+      closeAgents();
+      await resetAfterAgentSwitch(`已切换 ACP 代理：${ACP.active}`);
+    } else {
+      setBanner(`已选择 ACP 代理：${id}（切到 acp 引擎后生效）`);
+    }
+  } catch (err) {
+    setBanner("切换 ACP 代理失败：" + err.message);
+  }
+}
+
+async function editAgentCommand() {
+  if (!ACP.active) return;
+  const a = ACP.list.find((x) => x.id === ACP.active);
+  const cur = (a && a.command) ? a.command.join(" ") : "";
+  const v = prompt("编辑当前 agent 的命令（空格分隔；含空格的路径请用英文双引号包住）：", cur);
+  if (v === null) return;
+  const parts = (v.match(/"[^"]*"|\S+/g) || []).map((s) => s.replace(/^"|"$/g, ""));
+  if (!parts.length) { setBanner("命令为空，未修改"); return; }
+  try {
+    const r = await api("/engine/acp/agents", { method: "POST", body: JSON.stringify({ id: ACP.active, command: parts }) });
+    ACP.list = (r && r.agents) || ACP.list;
+    setBanner("已更新命令：" + parts.join(" "));
+    updateAcpRow();
+    renderAgents();
+  } catch (err) {
+    setBanner("更新命令失败：" + err.message);
+  }
+}
+
 function renderSettings() {
   const put = (id, val, text) => {
     const el = $(id);
@@ -1757,11 +2510,17 @@ function renderSettings() {
     const out = $(id + "-out");
     if (out) out.textContent = text;
   };
+  const bn = $("cfg-brand");
+  if (bn) bn.value = $("brand-name").textContent || BRAND_DEFAULT;
+  const bs = $("cfg-brand-sub");
+  if (bs) bs.value = ($("brand-sub") ? $("brand-sub").textContent : "") || BRAND_SUB_DEFAULT;
   put("cfg-dim-hiru", SET.dimHiru, SET.dimHiru + "%");
   put("cfg-dim-yoru", SET.dimYoru, SET.dimYoru + "%");
   put("cfg-blur", SET.blur, SET.blur + "px");
   put("cfg-rate", SET.rate, (SET.rate / 100).toFixed(2) + "×");
-  [["cfg-live", SET.live], ["cfg-taskbar", SET.taskbar],
+  put("cfg-spec-h", SET.spectrumSidesH, SET.spectrumSidesH + "%");
+  put("cfg-spec-gain", SET.spectrumSidesGain, SET.spectrumSidesGain + "%");
+  [["cfg-live", SET.live], ["cfg-taskbar", SET.taskbar], ["cfg-spec-sides", SET.spectrumSides],
    ["cfg-petals", SET.petals], ["cfg-zh", SET.zh]].forEach(([id, on]) => {
     const b = $(id);
     if (!b) return;
@@ -1772,30 +2531,73 @@ function renderSettings() {
 
 function initSettings() {
   const close = () => { $("cfg").hidden = true; };
-  const open = () => { $("cfg").hidden = false; renderSettings(); musicStatus(); };
+  const open = () => {
+    $("cfg").hidden = false;
+    renderSettings();
+    musicStatus();
+    loadWallpaperRoot();                    // 目录可能被外部改过，每次打开都刷新
+    loadEngineStatus();                     // 可用引擎 / 当前引擎（老后端会优雅降级）
+  };
   $("btn-cfg").addEventListener("click", () => ($("cfg").hidden ? open() : close()));
   $("cfg-close").addEventListener("click", close);
   $("cfg").addEventListener("click", (e) => { if (e.target === $("cfg")) close(); });
   window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("cfg").hidden) close(); });
 
+  $("cfg-brand").addEventListener("input", (e) => applyBrandName(e.target.value));
+  $("cfg-brand-sub").addEventListener("input", (e) => applyBrandSub(e.target.value));
+  $("cfg-engine").addEventListener("change", (e) => setEngine(e.target.value));
+  $("cfg-acp-btn").addEventListener("click", openAgents);
+  $("agents-close").addEventListener("click", closeAgents);
+  $("agents").addEventListener("click", (e) => { if (e.target === $("agents")) closeAgents(); });
+  $("agents-list").addEventListener("click", (e) => {
+    const del = e.target.closest("[data-del]");
+    if (del) { e.stopPropagation(); delAgent(del.dataset.del); return; }
+    const row = e.target.closest(".agents-row[data-aid]");
+    if (row) pickAgent(row.dataset.aid);
+  });
+  $("agents-add").addEventListener("click", openAgentsNew);
+  $("anew-close").addEventListener("click", closeAgentsNew);
+  $("agents-new").addEventListener("click", (e) => { if (e.target === $("agents-new")) closeAgentsNew(); });
+  $("anew-list").addEventListener("click", (e) => {
+    const row = e.target.closest(".agents-row[data-cid]");
+    if (row) addCandidate(row.dataset.cid);
+  });
+  $("anew-reload").addEventListener("click", loadCandidates);
+  $("anew-folder").addEventListener("click", addFromFolder);
+  $("agents-reload").addEventListener("click", loadAcpAgents);
+  $("agents-detect").addEventListener("click", detectAgents);
+  $("agents-edit").addEventListener("click", editAgentCommand);
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("agents-new").hidden) { closeAgentsNew(); return; }
+    if (!$("agents").hidden) closeAgents();
+  });
   $("cfg-dim-hiru").addEventListener("input", (e) => setSetting("dimHiru", Number(e.target.value)));
   $("cfg-dim-yoru").addEventListener("input", (e) => setSetting("dimYoru", Number(e.target.value)));
   $("cfg-blur").addEventListener("input", (e) => setSetting("blur", Number(e.target.value)));
   $("cfg-rate").addEventListener("input", (e) => setSetting("rate", Number(e.target.value)));
   $("cfg-live").addEventListener("click", () => setSetting("live", !SET.live));
   $("cfg-taskbar").addEventListener("click", () => setSetting("taskbar", !SET.taskbar));
+  $("cfg-spec-sides").addEventListener("click", () => setSetting("spectrumSides", !SET.spectrumSides));
+  $("cfg-spec-h").addEventListener("input", (e) => setSetting("spectrumSidesH", Number(e.target.value)));
+  $("cfg-spec-gain").addEventListener("input", (e) => setSetting("spectrumSidesGain", Number(e.target.value)));
   $("cfg-petals").addEventListener("click", () => setSetting("petals", !SET.petals));
   $("cfg-zh").addEventListener("click", () => {
     setSetting("zh", !SET.zh);
     MUSIC.lyrKey = "";                       // 开关变了要重新取一次歌词（tr=0/1 不同）
     ensureLyrics();
   });
+  $("cfg-wall-root-pick").addEventListener("click", pickWallpaperRoot);
+  $("cfg-wall-root-auto").addEventListener("click", () => saveWallpaperRoot(""));
   $("cfg-wall").addEventListener("click", () => { close(); openWallpapers(); });
   $("cfg-ck-netease").addEventListener("click", () => pasteCookie("netease"));
   $("cfg-ck-qq").addEventListener("click", () => pasteCookie("qq"));
   $("cfg-reset").addEventListener("click", () => {
     Object.assign(SET, SET_DEFAULT);
     saveSettings();
+    applyBrandName("");                    // 名字 / 小标签也回到默认
+    applyBrandSub("");
+    saveWallpaperRoot("");                 // 动态壁纸目录恢复自动查找
     applySettings();
     renderSettings();
   });
@@ -1989,6 +2791,58 @@ async function loadWallpaperList() {
   return WALL.data;
 }
 
+/** 动态壁纸读取目录：留空 = 自动查找本机创意工坊 431960 */
+async function loadWallpaperRoot() {
+  try {
+    const r = await api("/live/root");
+    const input = $("cfg-wall-root");
+    if (!input) return;
+    input.value = (r && r.override) || "";
+    input.placeholder = r && r.auto ? "留空 = " + r.auto : "留空 = 自动查找";
+    input.title = r && r.effective ? "当前生效：" + r.effective : "";
+  } catch { /* 服务没起来就保持原样 */ }
+}
+
+async function saveWallpaperRoot(value) {
+  try {
+    const r = await api("/live/root", { method: "POST", body: JSON.stringify({ root: value || "" }) });
+    if (!r || !r.ok) {
+      alert((r && r.message) || "保存动态壁纸目录失败");
+      await loadWallpaperRoot();
+      return;
+    }
+    await loadWallpaperRoot();
+    WALL.data = null;                       // 目录变了，壁纸清单要重取
+    if (liveReload) await liveReload();
+    if (!$("wp").hidden) await openWallpapers();
+  } catch (e) {
+    alert("保存动态壁纸目录失败：" + (e && e.message ? e.message : e));
+    await loadWallpaperRoot();
+  }
+}
+
+/** 点「选择…」→ 服务端弹 Windows 原生文件夹选择框 → 选完自动保存并换片 */
+async function pickWallpaperRoot() {
+  const btn = $("cfg-wall-root-pick");
+  const old = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "选择中…"; }
+  try {
+    const r = await api("/live/root/pick", { method: "POST" });
+    if (r && r.ok && r.path) {
+      await saveWallpaperRoot(r.path);
+    } else if (r && r.canceled) {
+      /* 用户取消：什么都不做 */
+    } else {
+      alert((r && r.error) || "选择文件夹失败");
+    }
+  } catch (e) {
+    alert("选择文件夹失败：" + (e && e.message ? e.message : e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || "选择…"; }
+    await loadWallpaperRoot();
+  }
+}
+
 function renderWallpapers() {
   const d = WALL.data || {};
   const pick = d.pick || {};
@@ -2066,7 +2920,7 @@ function initWallpaperPicker() {
 
 /* ---------------- 面板内搜歌/放歌（网易云 · 非官方接口，走 /music/* 代理）---------------- */
 
-const MUS = { list: [], playing: null, provider: "netease", loop: true, shuffle: false, seq: 0 };
+const MUS = { list: [], playing: null, provider: "netease", loop: "all", shuffle: false, bag: [], queueName: "", playlists: [], recommend: [], playlistId: "", homeOpen: false, homeView: "recommend", homeSig: "", playlistsErr: "", recommendErr: "", view: "", seq: 0 };
 const MUS_KEY = "opencode-ui.music";
 const MUS_SAVE_EVERY = 2000;                  // 播放中每隔 2s 落一次盘，刷新后能接着放
 
@@ -2078,8 +2932,9 @@ function musicSnapshot() {
     provider: MUS.provider,
     list: MUS.list || [],
     playing: MUS.playing || null,
-    loop: !!MUS.loop,
+    loop: MUS.loop,
     shuffle: !!MUS.shuffle,
+    queueName: MUS.queueName || "",
     panel: MUSIC.panel ? { ...MUSIC.panel } : null,
     pos: a ? (a.currentTime || 0) : 0,
     wasPlaying: !!(MUSIC.panel && a && !a.paused && !a.ended),
@@ -2124,8 +2979,11 @@ async function pasteCookie(provider) {
 function setProvider(p) {
   MUS.provider = p === "qq" ? "qq" : "netease";
   renderProvider();
-  MUS.list = []; MUS.playing = null;
-  renderBarResults();
+  MUS.list = []; MUS.playing = null; MUS.bag = []; MUS.queueName = "";
+  MUS.playlists = []; MUS.recommend = []; MUS.playlistId = "";
+  MUS.homeView = "recommend"; MUS.homeSig = "";
+  if (MUS.homeOpen) { hideBarResults(); renderHome(); loadHomePlaylists(); loadHomeRecommend(); }
+  else renderBarResults();
   musicStatus();
   saveMusicState();
 }
@@ -2140,12 +2998,215 @@ function renderBarResults() {
   if (!box) return;
   if (!MUS.list.length) { box.hidden = true; box.innerHTML = ""; return; }
   box.hidden = false;
-  box.innerHTML = `<div class="hint">点一条即在面板里播放（`
-    + (MUS.provider === "qq" ? "QQ音乐" : "网易云") + `）：</div>`
+  const pf = MUS.provider === "qq" ? "QQ音乐" : "网易云";
+  const head = MUS.queueName
+    ? `歌单：${esc(MUS.queueName)} · ${MUS.list.length} 首（循环/随机作用于它）`
+    : `点一条即在面板里播放（${pf}）：`;
+  MUS.view = "songs";
+  box.innerHTML = `<div class="hint p-results-h"><span>${head}</span>`
+    + `<button type="button" class="p-x" data-close="1" title="收起结果">×</button></div>`
     + MUS.list.map((it) => `<div class="it${String(it.id) === String(MUS.playing) ? " on" : ""}"`
       + ` data-play="${esc(it.id)}">`
       + `<b>${esc(it.name)}</b><i>${esc(it.artists)}</i>`
       + `<i>${esc(it.album || "")}</i></div>`).join("");
+}
+
+/** 收起播放条里的结果区（搜索 / 歌单都收）。 */
+function hideBarResults() {
+  const box = $("p-results");
+  if (box) { box.hidden = true; box.innerHTML = ""; }
+  MUS.view = "";
+}
+
+/* ---------------- 音乐主页（全页；布局仿平台、风格随面板）---------------- */
+
+function openMusicHome() {
+  const bs = $("body-stage");
+  if (bs) bs.classList.add("mus-open");
+  MUS.homeOpen = true;
+  MUS.homeSig = "";
+  if (!(MUS.playlists || []).length) loadHomePlaylists();
+  if (!(MUS.recommend || []).length) loadHomeRecommend();
+  renderHome();
+  const q = $("mus-q");
+  if (q) setTimeout(() => q.focus(), 50);
+}
+
+function closeMusicHome() {
+  const bs = $("body-stage");
+  if (bs) bs.classList.remove("mus-open");
+  MUS.homeOpen = false;
+}
+
+/** 主页视图：recommend（推荐）/ mine（我的歌单）/ songs（当前队列） */
+function setHomeView(v) {
+  MUS.homeView = (v === "mine" || v === "songs") ? v : "recommend";
+  MUS.homeSig = "";
+  if (MUS.homeView === "mine" && !(MUS.playlists || []).length) loadHomePlaylists();
+  if (MUS.homeView === "recommend" && !(MUS.recommend || []).length) loadHomeRecommend();
+  renderHome();
+}
+
+/** 主页渲染（签名去重：播放状态微变时不重建长列表） */
+function renderHome() {
+  if (!MUS.homeOpen) return;
+  const head = $("mus-main-h"), box = $("mus-songs");
+  if (!head || !box) return;
+  const sig = [MUS.homeView, MUS.provider, MUS.queueName || "", MUS.playing || "",
+    MUS.list.length, (MUS.list[0] && MUS.list[0].id) || "",
+    (MUS.playlists || []).length, (MUS.recommend || []).length,
+    MUS.playlistsErr || "", MUS.recommendErr || ""].join("|");
+  if (sig === MUS.homeSig) return;
+  MUS.homeSig = sig;
+
+  document.querySelectorAll("#mus-home .mus-nav-i")
+    .forEach((b) => b.classList.toggle("on", b.dataset.view === MUS.homeView));
+  const pf = MUS.provider === "qq" ? "QQ音乐" : "网易云";
+
+  // 推荐 / 我的 → 歌单列表
+  if (MUS.homeView === "recommend" || MUS.homeView === "mine") {
+    const isMine = MUS.homeView === "mine";
+    const items = (isMine ? MUS.playlists : MUS.recommend) || [];
+    const err = isMine ? MUS.playlistsErr : MUS.recommendErr;
+    head.innerHTML = `<b>${isMine ? "我的歌单" : "推荐歌单"}</b><span>${pf} · ${items.length} 个</span>`;
+    if (err) { box.innerHTML = `<div class="mus-empty">${esc(err)}</div>`; return; }
+    if (!items.length) { box.innerHTML = `<div class="mus-empty">加载中…</div>`; return; }
+    box.innerHTML = items.map((p) => `<div class="mus-pl" data-pl="${esc(p.id)}" data-name="${esc(p.name || "")}">`
+      + `<b>${esc(p.name || "(无标题)")}</b>`
+      + `<i>${p.count ? fmtCount(p.count) + " 播放" : ""}</i></div>`).join("");
+    return;
+  }
+
+  // songs → 当前队列
+  const title = MUS.queueName || (MUS.list.length ? "搜索结果" : "当前队列");
+  head.innerHTML = `<b>${esc(title)}</b><span>${pf} · ${MUS.list.length} 首</span>`
+    + (MUS.list.length > 1 ? `<button id="mus-playall">随机播放</button>` : "");
+  const all = head.querySelector("#mus-playall");
+  if (all) all.addEventListener("click", () => {
+    if (!MUS.list.length) return;
+    musicPlay(MUS.list[Math.floor(Math.random() * MUS.list.length)].id, { play: true });
+  });
+  if (!MUS.list.length) {
+    box.innerHTML = `<div class="mus-empty">左侧「我的」选歌单、或「推荐」挑一个、或上方搜索。<br>`
+      + `<b>循环 / 随机作用于当前队列</b>；队列也能在音乐条的「≡」里看。</div>`;
+    return;
+  }
+  box.innerHTML = MUS.list.map((it, i) => `<div class="mus-song${String(it.id) === String(MUS.playing) ? " on" : ""}"`
+    + ` data-play="${esc(it.id)}">`
+    + `<span class="s-no">${i + 1}</span>`
+    + `<span class="s-name">${esc(it.name || "")}</span>`
+    + `<span class="s-artist">${esc(it.artists || "")}</span>`
+    + `<span class="s-album">${esc(it.album || "")}</span>`
+    + `<span class="s-dur">${it.duration ? musTime(it.duration) : ""}</span></div>`).join("");
+}
+
+/** 播放量：>=1 万折成「x 万」 */
+function fmtCount(n) {
+  n = Number(n) || 0;
+  return n >= 10000 ? Math.round(n / 10000) + "万" : String(n);
+}
+
+async function loadHomePlaylists() {
+  MUS.playlistsErr = "";
+  try {
+    const r = await api("/music/playlists?p=" + MUS.provider);
+    if (r && r.ok) MUS.playlists = r.playlists || [];
+    else { MUS.playlists = []; MUS.playlistsErr = (r && r.error) || "拿不到歌单"; }
+  } catch (e) {
+    MUS.playlists = [];
+    MUS.playlistsErr = "歌单加载失败：" + (e && e.message ? e.message : e);
+  }
+  MUS.homeSig = "";
+  renderHome();
+}
+
+async function loadHomeRecommend() {
+  MUS.recommendErr = "";
+  try {
+    const r = await api("/music/recommend?p=" + MUS.provider);
+    if (r && r.ok) MUS.recommend = r.playlists || [];
+    else { MUS.recommend = []; MUS.recommendErr = (r && r.error) || "拿不到推荐"; }
+  } catch (e) {
+    MUS.recommend = [];
+    MUS.recommendErr = "推荐加载失败：" + (e && e.message ? e.message : e);
+  }
+  MUS.homeSig = "";
+  renderHome();
+}
+
+/** 音乐条里的「当前播放列表」（队列）—— 点「≡」展开 */
+function renderQueue() {
+  const box = $("p-results");
+  if (!box) return;
+  MUS.view = "queue";
+  box.hidden = false;
+  const close = `<button type="button" class="p-x" data-close="1" title="收起">×</button>`;
+  const pf = MUS.provider === "qq" ? "QQ音乐" : "网易云";
+  const head = `当前播放列表 · ${MUS.list.length} 首`
+    + (MUS.queueName ? `（${esc(MUS.queueName)}）` : `（${pf}）`);
+  if (!MUS.list.length) {
+    box.innerHTML = `<div class="hint p-results-h"><span>当前播放列表是空的</span>${close}</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="hint p-results-h"><span>${head}</span>${close}</div>`
+    + MUS.list.map((it, i) => `<div class="it${String(it.id) === String(MUS.playing) ? " on" : ""}"`
+      + ` data-play="${esc(it.id)}">`
+      + `<b>${i + 1}. ${esc(it.name || "")}</b><i>${esc(it.artists || "")}</i></div>`).join("");
+}
+
+/** 我的歌单：列出当前平台登录用户的歌单（QQ 走 GetPlaylistByUin；网易云需 Cookie 含 MUSIC_U）。 */
+async function musicPlaylists() {
+  const box = $("p-results");
+  const pf = MUS.provider === "qq" ? "QQ音乐" : "网易云";
+  if (box) { box.hidden = false; box.innerHTML = '<div class="hint">加载 ' + pf + ' 歌单…</div>'; }
+  try {
+    const r = await api("/music/playlists?p=" + MUS.provider);
+    if (!r || !r.ok) {
+      if (box) box.innerHTML = '<div class="hint">' + esc((r && r.error) || "拿不到歌单") + '</div>';
+      return;
+    }
+    const ps = r.playlists || [];
+    if (!ps.length) { if (box) box.innerHTML = '<div class="hint">这个账号没有歌单</div>'; return; }
+    MUS.view = "playlists";
+    if (box) {
+      box.hidden = false;
+      box.innerHTML = `<div class="hint p-results-h"><span>${pf} · 我的歌单（${ps.length}）—— 点一个当播放队列</span>`
+        + `<button type="button" class="p-x" data-close="1" title="收起结果">×</button></div>`
+        + ps.map((p) => `<div class="it pl" data-pl="${esc(p.id)}" data-name="${esc(p.name || "")}">`
+          + `<b>${esc(p.name || "(无标题)")}</b><i>${p.count || 0} 首</i>`
+          + `<i>${esc(p.creator || "")}</i></div>`).join("");
+    }
+  } catch (e) {
+    if (box) box.innerHTML = '<div class="hint">歌单加载失败：' + esc(e && e.message ? e.message : e) + '</div>';
+  }
+}
+
+/** 打开一个歌单：把它作为播放队列并开始播放（随机开启则随机起播；循环/随机都作用于它）。 */
+async function musicPlaylistOpen(id, name) {
+  const box = $("p-results");
+  if (box) { box.hidden = false; box.innerHTML = '<div class="hint">加载歌单歌曲…</div>'; }
+  try {
+    const r = await api("/music/playlist?p=" + MUS.provider + "&id=" + encodeURIComponent(id));
+    if (!r || !r.ok) {
+      if (box) box.innerHTML = '<div class="hint">' + esc((r && r.error) || "拿不到歌单歌曲") + '</div>';
+      return;
+    }
+    const songs = r.songs || [];
+    if (!songs.length) { if (box) box.innerHTML = '<div class="hint">这个歌单是空的</div>'; return; }
+    MUS.list = songs;
+    MUS.queueName = name || "";
+    MUS.playlistId = id;
+    MUS.bag = [];
+    MUS.homeView = "songs";
+    MUS.homeSig = "";
+    if (MUS.homeOpen) hideBarResults();
+    else renderBarResults();
+    renderHome();
+    const first = MUS.shuffle ? songs[Math.floor(Math.random() * songs.length)].id : songs[0].id;
+    musicPlay(first, { play: true });
+  } catch (e) {
+    if (box) box.innerHTML = '<div class="hint">歌单加载失败：' + esc(e && e.message ? e.message : e) + '</div>';
+  }
 }
 
 function musTime(s) {
@@ -2157,15 +3218,28 @@ async function musicSearch(qRaw) {
   const q = String(qRaw || "").trim();
   if (!q) return;
   const box = $("p-results");
-  if (box) { box.hidden = false; box.innerHTML = '<div class="hint">搜索中…</div>'; }
+  if (MUS.homeOpen) { const s = $("mus-songs"); if (s) s.innerHTML = `<div class="mus-empty">搜索中…</div>`; }
+  else if (box) { box.hidden = false; box.innerHTML = '<div class="hint">搜索中…</div>'; }
   try {
     const r = await api("/music/search?p=" + MUS.provider + "&q=" + encodeURIComponent(q) + "&limit=20");
     MUS.list = (r && r.songs) || [];
-    renderBarResults();
+    MUS.bag = [];                          // 新一批结果 → 随机队列重洗
+    MUS.queueName = "";                    // 搜索结果不是歌单
+    MUS.playlistId = "";
+    MUS.homeSig = "";
+    if (MUS.homeOpen) MUS.homeView = "songs";
+    if (MUS.homeOpen) { hideBarResults(); renderHome(); }
+    else renderBarResults();
     saveMusicState();
-    if (!MUS.list.length && box) box.innerHTML = '<div class="hint">没搜到「' + esc(q) + '」</div>';
+    if (!MUS.list.length) {
+      const msg = '没搜到「' + esc(q) + '」';
+      if (MUS.homeOpen) { const s = $("mus-songs"); if (s) s.innerHTML = '<div class="mus-empty">' + msg + '</div>'; }
+      else if (box) box.innerHTML = '<div class="hint">' + msg + '</div>';
+    }
   } catch (e) {
-    if (box) box.innerHTML = '<div class="hint">搜索失败：' + esc(e && e.message ? e.message : e) + '</div>';
+    const msg = '搜索失败：' + esc(e && e.message ? e.message : e);
+    if (MUS.homeOpen) { const s = $("mus-songs"); if (s) s.innerHTML = '<div class="mus-empty">' + msg + '</div>'; }
+    else if (box) box.innerHTML = '<div class="hint">' + msg + '</div>';
   }
 }
 
@@ -2186,7 +3260,9 @@ async function musicPlay(id, opts = {}) {
     id,
   };
   MUSIC.panelError = "";
-  renderBarResults();
+  if (MUS.homeOpen) hideBarResults();
+  else renderBarResults();
+  renderHome();
   renderPlayer();
 
   const mid2 = it.mediaMid ? "&mid2=" + encodeURIComponent(it.mediaMid) : "";
@@ -2227,30 +3303,63 @@ async function musicPlay(id, opts = {}) {
   return true;
 }
 
-/** 下一首（面板队列）。auto=true 表示歌曲自然放完触发；loop 关闭时到队尾就停。 */
+/** 随机：洗牌袋里取下一个（一轮内不重复；取空后重洗，尽量避开刚放完的那首） */
+function shufflePick(cur, total) {
+  if (!Array.isArray(MUS.bag) || MUS.bag.length === 0) {
+    const arr = [];
+    for (let i = 0; i < total; i++) arr.push(i);
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+    }
+    if (arr.length > 1 && arr[0] === cur) { arr[0] = arr[1]; arr[1] = cur; }
+    MUS.bag = arr;
+  }
+  return MUS.bag.shift();
+}
+
+/**
+ * 下一首（面板队列）。auto=true 表示歌曲自然放完触发。
+ * 循环：off=放完列表就停 / all=列表循环 / one=单曲循环。
+ * 随机开启时优先随机（洗牌袋，一轮内不重复）。
+ */
 async function musicNext(auto, dir = 1) {
   const list = MUS.list || [];
   if (!list.length) return false;
   let idx = list.findIndex((x) => String(x.id) === String(MUS.playing));
   if (idx < 0) idx = dir > 0 ? -1 : 0;
   const total = list.length;
+
+  // 单曲循环：自然放完就重放当前曲（随机开启时随机优先）
+  if (auto && dir > 0 && !MUS.shuffle && MUS.loop === "one" && idx >= 0) {
+    return await musicPlay(list[idx].id, { play: true });
+  }
+
   for (let tries = 0; tries < total; tries++) {
+    let n;
     if (MUS.shuffle && total > 1) {
-      let n = idx;
-      while (n === idx) n = Math.floor(Math.random() * total);
-      idx = n;
+      n = shufflePick(idx, total);
+      if (n === undefined || n < 0) return false;
     } else {
       const next = idx + dir;
-      if (auto && !MUS.loop && dir > 0 && next >= total) return false;
-      idx = ((next % total) + total) % total;
+      if (auto && dir > 0 && MUS.loop === "off" && next >= total) return false;  // 到队尾且不循环 → 停
+      n = ((next % total) + total) % total;
     }
-    const ok = await musicPlay(list[idx].id, { play: true });
+    const ok = await musicPlay(list[n].id, { play: true });
     if (ok) return true;
+    idx = n;
   }
   return false;
 }
 
 function musicPrev() { return musicNext(false, -1); }
+
+/** 循环模式归一化：兼容旧值 true/false；默认列表循环 */
+function normalizeLoop(v) {
+  if (v === "one" || v === "all" || v === "off") return v;
+  if (v === false) return "off";
+  return "all";
+}
 
 function updatePlayModeButtons() {
   const s = $("p-shuffle"), l = $("p-loop");
@@ -2259,8 +3368,10 @@ function updatePlayModeButtons() {
     s.title = "随机播放：" + (MUS.shuffle ? "开" : "关");
   }
   if (l) {
-    l.classList.toggle("on", !!MUS.loop);
-    l.title = "自动连播：" + (MUS.loop ? "开" : "关");
+    l.classList.toggle("on", MUS.loop !== "off");
+    l.classList.toggle("one", MUS.loop === "one");
+    l.textContent = MUS.loop === "one" ? "↻¹" : (MUS.loop === "all" ? "↻" : "循");
+    l.title = "循环：" + (MUS.loop === "one" ? "单曲循环" : MUS.loop === "all" ? "列表循环" : "关") + "（点击切换）";
   }
 }
 
@@ -2268,8 +3379,10 @@ function updatePlayModeButtons() {
 async function restoreMusicState() {
   const st = loadMusicState();
   MUS.provider = st.provider === "qq" ? "qq" : "netease";
-  MUS.loop = st.loop !== false;
+  MUS.loop = normalizeLoop(st.loop);
   MUS.shuffle = !!st.shuffle;
+  MUS.bag = [];
+  MUS.queueName = st.queueName || "";
   renderProvider();
   updatePlayModeButtons();
   if (!st.panel || !st.playing) return;
@@ -2306,7 +3419,7 @@ async function musicStatus() {
 function initMusicAudio() {
   const audio = $("mus-audio");
   ["play", "pause", "ended", "error"].forEach((ev) => audio.addEventListener(ev, () => {
-    if (ev === "ended" && (MUS.loop || MUS.shuffle) && (MUS.list || []).length) {
+    if (ev === "ended" && (MUS.loop !== "off" || MUS.shuffle) && (MUS.list || []).length) {
       musicNext(true);                       // 自动连播 / 随机播放
       return;
     }
@@ -2373,6 +3486,55 @@ function defaultModel() {
 
 function saveDefaultModel(ref) {
   try { localStorage.setItem(MODEL_KEY, JSON.stringify(ref)); } catch { /* 隐私模式 */ }
+}
+
+/**
+ * 解析「新会话默认模型」：本地存的 → 服务端默认 → 清单第一个；解析到就记住。
+ * ⚠ 本地存的若已不在模型清单里（比如模型下线），视为失效，重新解析 ——
+ *   否则新会话会挂一个无效模型，发出去又是「发了没反应」。
+ */
+async function resolveDefaultModel() {
+  const saved = defaultModel();
+  if (saved && saved.id && saved.providerID) {
+    const list = MODEL.list;
+    if (!list || list.some((m) => m.id === saved.id && m.providerID === saved.providerID)) {
+      return saved;
+    }
+  }
+  let ref = null;
+  try {
+    const d = unwrap(await api("/api/model/default"));
+    if (d && d.id) ref = { id: d.id, providerID: d.providerID };
+  } catch { /* 后端不支持就算了 */ }
+  if (!ref) {
+    const list = await loadModels();
+    const first = (list || []).find((m) => m && m.id && m.providerID);
+    if (first) ref = { id: first.id, providerID: first.providerID };
+  }
+  if (ref) saveDefaultModel(ref);
+  return ref;
+}
+
+/**
+ * 确保某个会话已绑定模型：没有就先补默认模型并写回服务端。
+ * send() 之前调用，避免「新建会话没模型 → 发出去空转、没有任何回答」。
+ * 失败不抛异常（交给发送流程照常走，真失败会有 error-box）。
+ */
+async function ensureSessionModel(sid) {
+  if (!sid) return null;
+  if (state.current && state.current.id === sid && state.current.model) return state.current.model;
+  const ref = await resolveDefaultModel();
+  if (!ref) return null;
+  try {
+    await api(`/api/session/${encodeURIComponent(sid)}/model`,
+      { method: "POST", body: JSON.stringify({ model: ref }) });
+    const m = { id: ref.id, providerID: ref.providerID, variant: ref.variant || "default" };
+    if (state.current && state.current.id === sid) state.current.model = m;
+    const s = state.sessions.find((x) => x.id === sid);
+    if (s) s.model = m;
+    updateModelBtn();
+    return m;
+  } catch { return null; }
 }
 
 /** 当前生效的模型：优先当前会话，其次"新会话默认" */
@@ -2462,6 +3624,7 @@ async function pickModel(ref) {
     { method: "POST", body: JSON.stringify({ model: ref }) });
   // 服务端在没给 variant 时会填 "default"，这里保持一致
   state.current.model = { id: ref.id, providerID: ref.providerID, variant: ref.variant || "default" };
+  saveDefaultModel(state.current.model);            // ★ 顺带记为"新会话默认模型"，下次新建自动跟随
   const s = state.sessions.find((x) => x.id === sid);
   if (s) s.model = state.current.model;
   renderModels();
@@ -2508,6 +3671,15 @@ function initModelPicker() {
 /* ---------------- 事件绑定 / 启动 ---------------- */
 
 $("session-list").addEventListener("click", (e) => {
+  const info = e.target.closest(".info");          // 详情展开按钮：先判断，别让它同时触发"打开会话"
+  if (info) {
+    e.preventDefault();
+    e.stopPropagation();
+    const id = info.dataset.info;
+    state.detailOpen[id] = !state.detailOpen[id];
+    renderSessions();
+    return;
+  }
   const del = e.target.closest(".del");            // 删除按钮：先判断，别让它同时触发"打开会话"
   if (del) {
     e.preventDefault();
@@ -2574,7 +3746,12 @@ $("messages").addEventListener("scroll", () => {
   pollAsks();
   loadModels().then(updateModelBtn);      // 预取模型清单：顶栏按钮才能立刻显示官方图标
   startHeartbeat();
-  setBanner("正在连接 OpenCode…");
+  setBanner("正在连接引擎…");
+  renderMessages();      // ⚠ 必须先渲染一次：没有会话时也要把消息区换成空态，否则会一直留着 index.html 的兜底横幅
   connectionLoop();
   setInterval(loadSessions, 20000);
 })();
+
+/* 标记：app.js 已成功执行。index.html 里的兜底脚本靠它判断要不要自动重试。 */
+window.__appLoaded = true;
+try { sessionStorage.removeItem("opencode-ui.appReloads"); } catch (e) { /* ignore */ }
