@@ -84,11 +84,13 @@ if (Test-Path -LiteralPath $Progs) {
 & cmd /c mklink /J "$L\@opencodedesktop" "$App" | Out-Null
 if (Is-Junction "$L\@opencodedesktop") { Log "junction OK: $L\@opencodedesktop -> $App" } else { Log "junction FAILED"; exit 6 }
 
-# 7) register the auto-heal scheduled tasks (current user, no admin needed)
-$tr = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + $Heal + '"'
-& schtasks /Create /TN "OpenCodeLinkHeal-15min" /TR $tr /SC MINUTE /MO 15 /F | Out-Null
-& schtasks /Create /TN "OpenCodeLinkHeal-logon" /TR $tr /SC ONLOGON /F | Out-Null
-Log "registered tasks: OpenCodeLinkHeal-15min, OpenCodeLinkHeal-logon"
+# 7) self-heal no longer uses a scheduled task: launchers/launch_opencode.py runs
+#    scripts/heal_opencode_link.py (hidden) right before starting OpenCode.
+#    Remove any task left behind by older versions of this installer.
+foreach ($tn in @("OpenCodeLinkHeal-15min", "OpenCodeLinkHeal-logon")) {
+    try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+}
+Log "self-heal moved to the launcher (no scheduled task)"
 
 Log "=== done ==="
 Log "Reopen OpenCode with the desktop shortcut. Other apps now install to C: as before."

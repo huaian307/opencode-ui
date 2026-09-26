@@ -30,10 +30,11 @@
   --run:        #a8842c;
   --err:        #b3261e;
 
+  /* Cambria Math 放在最后一位：前面的字体缺数学符号时由它补，避免 ∑ ∫ √ 这类显示成方框 */
   --serif: "Yu Mincho", "MS Mincho", "Noto Serif SC", "Source Han Serif SC",
-           "Songti SC", "SimSun", serif;
-  --sans:  "Yu Gothic UI", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
-  --mono:  ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+           "Songti SC", "SimSun", "Cambria Math", serif;
+  --sans:  "Yu Gothic UI", "Microsoft YaHei UI", "Segoe UI", "Cambria Math", system-ui, sans-serif;
+  --mono:  ui-monospace, "Cascadia Mono", Consolas, "Courier New", "Cambria Math", monospace;
 
   --radius: 3px;          /* 和风：小圆角，接近直角更利落 */
   --sidebar: 288px;
@@ -551,6 +552,15 @@ details.part .body.stream { max-height: none; overflow: visible; }
   -webkit-backdrop-filter: blur(10px);
 }
 
+/* 白昼也一样：信纸面板改成半透和纸 + 高斯模糊（夜主题是黑纱毛玻璃，昼主题是白纸毛玻璃） */
+[data-theme="hiru"] #sidebar,
+[data-theme="hiru"] #topbar,
+[data-theme="hiru"] #composer {
+  background: rgba(250, 247, 242, .72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
 /* ---------- 动态壁纸（Wallpaper Engine 原片）----------
    收起侧栏 → **缓慢启动**：转速由静止慢慢加上去；
    展开会话 → **缓慢停止**：转速慢慢减到停，**停住的那一帧就是静态背景**
@@ -646,6 +656,30 @@ html[data-theme="hiru"].has-live #live-bg .lb-wash { display: none; }
 .cfg-row.sub input[type="range"] { width: 150px; }
 .cfg-row > label { flex: 1; min-width: 0; font-size: 13px; }
 .cfg-row > label i { display: block; font-style: normal; font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
+/* 「上下两行」的行：label 独占一行，控件在下一行（给"输入框 + 输入框 + 按钮"这种多的用）。
+   ⚠ 不加这个的话，一行里塞两个 190px 输入框会把 label 挤成"一行一个字"（实测踩到）。 */
+.cfg-row.wide { flex-direction: column; align-items: stretch; gap: 6px; }
+.cfg-row.wide > label { flex: none; }
+.cfg-row .cfg-ctl { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cfg-row .cfg-ctl input[type="text"],
+.cfg-row .cfg-ctl input[type="password"] { flex: 1 1 160px; width: auto; min-width: 0; }
+.cfg-row .cfg-ctl button { flex: none; }
+/* API Key：变量名是**只读小标签**（按品牌自动决定），旁边只有值输入框 + 保存。
+   ⚠ 以前是两个输入框（变量名 + 值），用户第一反应是"为什么有两个"——所以砍掉手填。 */
+.cfg-key-var {
+  flex: none; display: inline-flex; align-items: center;
+  padding: 5px 9px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--ink-faint) 10%, transparent);
+  font-size: 11.5px; letter-spacing: .02em; color: var(--ink-dim); white-space: nowrap;
+}
+/* 自定义素材那一排（头像 / 空会话主图 / 贴纸） */
+.cfg-art { gap: 8px; }
+.cfg-art .cfg-art-k { flex: 0 0 88px; font-size: 11.5px; color: var(--ink-dim); }
+.cfg-art button { padding: 4px 10px; font-size: 11.5px; }
+.cfg-art .cfg-img-name {
+  flex: 1 1 90px; min-width: 0; font-size: 10.5px; color: var(--ink-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .cfg-row input[type="range"] {
   -webkit-appearance: none; appearance: none; width: 190px; height: 4px;
   border-radius: 2px; cursor: pointer; outline: none;
@@ -655,12 +689,14 @@ html[data-theme="hiru"].has-live #live-bg .lb-wash { display: none; }
   -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%;
   background: var(--hi); border: 1px solid var(--paper); cursor: pointer;
 }
-.cfg-row input[type="text"] {
+.cfg-row input[type="text"],
+.cfg-row input[type="password"] {
   width: 190px; padding: 6px 9px; font: inherit; font-size: 12.5px;
   color: var(--ink); background: var(--paper);
   border: 1px solid var(--line); border-radius: var(--radius); outline: none;
 }
-.cfg-row input[type="text"]:focus { border-color: var(--hi); box-shadow: 0 0 0 3px var(--hi-wash); }
+.cfg-row input[type="text"]:focus,
+.cfg-row input[type="password"]:focus { border-color: var(--hi); box-shadow: 0 0 0 3px var(--hi-wash); }
 #cfg-engine {
   min-width: 140px; padding: 6px 9px; font: inherit; font-size: 12.5px;
   color: var(--ink); background: var(--paper);
@@ -668,6 +704,13 @@ html[data-theme="hiru"].has-live #live-bg .lb-wash { display: none; }
 }
 #cfg-engine:focus { border-color: var(--hi); box-shadow: 0 0 0 3px var(--hi-wash); }
 #cfg-engine:disabled { opacity: .6; }
+.cfg-row select {
+  min-width: 160px; max-width: 300px; padding: 6px 9px; font: inherit; font-size: 12.5px;
+  color: var(--ink); background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--radius); outline: none;
+}
+.cfg-row select:focus { border-color: var(--hi); box-shadow: 0 0 0 3px var(--hi-wash); }
+.cfg-row select:disabled { opacity: .6; }
 /* 路径用等宽字体：日文字体里 U+005C(\) 会画成 ￥，换 Consolas 这类字体就正常 */
 #cfg-wall-root { font-family: var(--mono); font-size: 12px; letter-spacing: 0; }
 .cfg-row output { width: 44px; text-align: right; font-family: var(--mono); font-size: 12px; color: var(--ink-dim); }
@@ -1174,6 +1217,7 @@ html.lyrics-on .lyrics-overlay { display: flex; }
         display: grid; place-items: center; font-size: 16px; }
 .wp-cur { font-size: 11.5px; margin: 9px 0 6px; font-family: var(--mono); }
 
+#setup .wp-box { width: min(620px, 94vw); }
 .wp-list { display: grid; gap: 8px; margin: 6px 0 10px;
            grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
 /* 筛选条：搜索 + 分类（列表从 4 条涨到 31 条后必须有） */
@@ -1220,6 +1264,14 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 .agents-row .dot.ok { background: var(--gold); }
 .agents-row .ad { margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); word-break: break-all; }
 .agents-row .ab { margin-top: 3px; font-size: 11px; color: var(--ink-faint); line-height: 1.6; }
+/* 卡片上的 provider 徽章 + 「改」按钮（编辑名称/命令/目录/provider） */
+.agents-row .badge {
+  flex: none; font-size: 10px; line-height: 1.5; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--hi) 35%, transparent); color: var(--ink-faint);
+}
+.agents-row .p-x { flex: none; width: 20px; height: 20px; padding: 0; font-size: 11px; line-height: 1; }
+/* 编辑 agent 时的命令 / 目录输入框用等宽字体（路径里的反斜杠在日文字体下会显成￥） */
+.cfg-row input.mono { font-family: var(--mono); width: 320px; max-width: 46vw; }
 .mus-audio { width: 100%; height: 36px; margin: 2px 0 8px; }
 .wp-pb { padding: 5px 9px; font-size: 12px; }
 .wp-pb.on { background: var(--hi); border-color: var(--hi); color: #fff; font-weight: 600; }
@@ -1293,6 +1345,12 @@ html.lyrics-on .lyrics-overlay { display: flex; }
 .mdl-txt { min-width: 0; flex: 1; }
 .mdl-txt b, .mdl-txt i { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mdl-btn { max-width: 148px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ⚠ 顶栏按钮默认是 34px 方图标（`#topbar .actions button { width:34px }`），
+   带文字的按钮会被截断 —— 必须用 **id 选择器**（更高优先级）放开（踩坑 #24）。 */
+#topbar .actions #btn-agent {
+  width: auto; min-width: 52px; padding: 0 8px;
+  font-family: var(--mono); font-size: 12.5px;
+}
 
 /* ============================================================================
    龙族视觉层（2026-09-23）—— 顶栏铭牌 · 设置刻印 · 歌词译文
@@ -1404,6 +1462,8 @@ button.danger:hover:not(:disabled) { border-color: var(--err); }
   font-family: var(--serif); font-size: 10.5px; letter-spacing: .04em;
   color: color-mix(in srgb, var(--mk-cap) 85%, transparent); opacity: .75;
 }
+/* 宽行（标题 + 好几行控件）的罗马数字要贴在**标题行**上，否则会飘到整块中间（截图核对过） */
+.cfg-row.wide::before { top: 8px; transform: none; }
 
 /* ---- 开关：空刻印 → 启封 ---- */
 .cfg-toggle {

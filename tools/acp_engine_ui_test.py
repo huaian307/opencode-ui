@@ -68,15 +68,26 @@ TEST = """<script>
 setTimeout(async function () {
   var out = {};
   var note = function () { var n = document.getElementById("cfg-engine-note"); return n ? n.textContent : null; };
+  var wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
   try {
     var cfg = document.getElementById("btn-cfg");
     if (cfg) cfg.click();
-    await new Promise(function (r) { setTimeout(r, 1200); });
+    await wait(1200);
     var sel = document.getElementById("cfg-engine");
     out.options = [].slice.call(sel.options).map(function (o) { return o.value; });
     out.value = sel.value;
     out.disabled = sel.disabled;
     out.note0 = note();
+    // 引擎自述（可用性）也一起验：新后端 /engine/status 会带 engines[]
+    out.engines = (ENGINE.engines || []).map(function (e) {
+      return { id: e.id, label: e.label, available: e.available };
+    });
+    // 纯函数：不可用的引擎要标「未就绪」并 disabled（中性化 UX，不用真造一个坏引擎）
+    out.optHtml = engineOptionsHtml(["good", "bad"]) + engineOptionsHtml(["bad"]);
+    ENGINE.engines = [{ id: "good", label: "可用引擎", available: true },
+                      { id: "bad", label: "坏引擎", available: false }];
+    out.optHtml2 = engineOptionsHtml(["good", "bad"]);
+    ENGINE.engines = out.engines;
     var before = window.__esCount;
     await setEngine("acp");
     out.acpActive = ENGINE.active;
@@ -88,6 +99,117 @@ setTimeout(async function () {
     out.openEsDelta = window.__esCount - before2;
     out.title = (document.getElementById("session-title") || {}).textContent;
     out.msgCount = (state.messages || []).length;
+
+    // ---- agentlist 卡片 + 编辑弹窗（含 provider 中性化）----
+    await setEngine("acp");
+    await wait(600);
+    openAgents();
+    await wait(900);
+    out.agentsRows = document.querySelectorAll("#agents-list .agents-row[data-aid]").length;
+    out.agentsProviders = (ACP.list || []).map(function (a) {
+      return { id: a.id, provider: a.provider || "", guess: a.providerGuess || "" };
+    });
+    var first = (ACP.list || [])[0];
+    editAgentCommand(first.id);
+    await wait(200);
+    out.editOpen = !document.getElementById("agent-edit").hidden;
+    out.editLabel = document.getElementById("ae-label").value;
+    out.editCommand = document.getElementById("ae-command").value;
+    out.editProvider = document.getElementById("ae-provider").value;
+    // 引号包路径的命令解析（纯函数）
+    out.parsed = parseCmd('"C:\\\\Program Files\\\\x.exe" --flag  a');
+    // 点「自动」→ 后端猜 provider（不写盘）
+    document.getElementById("ae-guess").click();
+    await wait(900);
+    out.guessInput = document.getElementById("ae-provider").value;
+    out.guessMsg = document.getElementById("ae-msg").textContent;
+    // 填一个 provider 并保存 → 卡片上应出现该徽章
+    document.getElementById("ae-provider").value = "deepseek";
+    await saveAgentEdit();
+    await wait(400);
+    var saved = (ACP.list || []).filter(function (a) { return a.id === first.id; })[0] || {};
+    out.savedProvider = saved.provider || "";
+    out.editClosed = document.getElementById("agent-edit").hidden;
+    out.badgeInHtml = document.getElementById("agents-list").innerHTML.indexOf('data-edit') >= 0;
+
+    // ---- 从 agent 导入会话（session/list → import）----
+    var sessionsBefore = (state.sessions || []).length;
+    var impBtn = document.getElementById("btn-import");
+    out.impBtnVisible = !!impBtn && !impBtn.hidden;
+    if (impBtn) impBtn.click();
+    await wait(1200);
+    out.impOpen = !document.getElementById("import").hidden;
+    out.impCur = ((document.getElementById("imp-cur") || {}).textContent || "").slice(0, 80);
+    out.impRows = document.querySelectorAll("#imp-list [data-imp]").length;
+    // ⚠ 点**还没导入**的那条（已导入的点下去只是打开它，会话数不会 +1）
+    var fresh = [].slice.call(document.querySelectorAll("#imp-list [data-imp]"))
+      .filter(function (r) { return r.querySelector(".dot.ok") && r.textContent.indexOf("已导入") < 0; })[0];
+    out.impFreshFound = !!fresh;
+    if (fresh) fresh.click();
+    await wait(1500);
+    out.impClosed = document.getElementById("import").hidden;
+    out.impDelta = (state.sessions || []).length - sessionsBefore;
+    out.impCurSession = (state.current || {}).title || "";
+
+    // ---- 智能体 / 模式切换（/api/agent）----
+    document.getElementById("btn-agent").click();
+    await wait(1000);
+    out.modeOpen = !document.getElementById("mode").hidden;
+    out.modeRows = document.querySelectorAll("#mode-list [data-mode]").length;
+    out.modeCur = ((document.getElementById("mode-cur") || {}).textContent || "").slice(0, 90);
+    out.modeMarked = document.querySelectorAll("#mode-list [data-mode].on").length;
+    var other = [].slice.call(document.querySelectorAll("#mode-list [data-mode]"))
+      .filter(function (r) { return !r.classList.contains("on"); })[0];
+    var beforeBtn = (document.getElementById("btn-agent") || {}).textContent || "";
+    if (other) other.click();
+    await wait(1500);
+    out.modeClosed = document.getElementById("mode").hidden;
+    out.modeBtnBefore = beforeBtn;
+    out.modeBtnAfter = (document.getElementById("btn-agent") || {}).textContent || "";
+    // 顶栏按钮不能被当成 34px 方图标截断（踩坑 #24）——量出来，别靠肉眼看截图
+    var bBtn = document.getElementById("btn-agent");
+    out.modeBtnW = bBtn ? Math.round(bBtn.getBoundingClientRect().width) : 0;
+    out.modeBtnClipped = bBtn ? (bBtn.scrollWidth > bBtn.clientWidth + 1) : true;
+
+    // ---- 模型 API Key：设置里能填，且界面只拿到掩码 ----
+    // 现在**只有一个输入框**（值）+ 一个只读变量名标签（用户反馈"怎么有两个输入框"）
+    var cfgBtn = document.getElementById("btn-cfg");
+    if (cfgBtn) cfgBtn.click();
+    await wait(900);
+    out.keyRowThere = !!document.getElementById("cfg-key-row");
+    var varEl = document.getElementById("cfg-key-var");
+    out.keyNamePrefilled = (varEl || {}).textContent || "";
+    out.keyNameInputs = document.querySelectorAll("#cfg-key-row input").length;
+    out.keyVarReadonly = !!varEl && varEl.tagName !== "INPUT";
+    document.getElementById("cfg-key-value").value = "sk-abcdef1234567890";
+    document.getElementById("cfg-key-save").click();
+    await wait(900);
+    var note = (document.getElementById("cfg-key-note") || {}).textContent || "";
+    out.keyNote = note.slice(0, 160);
+    out.keyMasked = note.indexOf("sk-abcdef1234567890") < 0 && /sk-a|…|•/.test(note);
+    out.keyValueCleared = document.getElementById("cfg-key-value").value === "";
+    // 清除：值留空再保存（变量名沿用标签里那个）
+    document.getElementById("cfg-key-save").click();
+    await wait(700);
+    out.keyClearedNote = ((document.getElementById("cfg-key-note") || {}).textContent || "").slice(0, 80);
+
+    // ---- 空会话文案 + 自定义素材（头像/首图/贴纸）：改一下要立刻反映到首屏 ----
+    var l1 = document.getElementById("cfg-hero-l1");
+    l1.value = "测试文案一号";
+    l1.dispatchEvent(new Event("input", { bubbles: true }));
+    await wait(400);
+    out.heroL1 = SET.heroL1;
+    var ms = document.getElementById("msg-static");
+    if (ms) ms.innerHTML = heroHtml();
+    out.heroHasText = (ms ? ms.innerHTML : "").indexOf("测试文案一号") >= 0;
+    // 真跑一遍写接口（APPEARANCE_FILE 已被指到临时目录）
+    await setAppearanceImage("hero", "D:/opencode-ui/frontend/assets/sticker-duck.jpg");
+    out.appearUrl = appearanceUrl("hero", "/assets/hero.jpg");
+    out.appearName = (document.querySelector('[data-img-name="hero"]') || {}).textContent || "";
+    try { out.appearImg = (await fetch(appearanceUrl("hero", "/assets/hero.jpg"))).status; }
+    catch (e) { out.appearImg = -1; }
+    await setAppearanceImage("hero", "");
+    out.appearCleared = appearanceUrl("hero", "/assets/hero.jpg");
   } catch (e) { out.error = String(e); }
   out.jsErrors = window.__probeErr;
   var pre = document.createElement("pre");
@@ -140,6 +262,39 @@ def main() -> int:
     os.environ.pop("OPENCODE_UI_ENGINE", None)          # 确保按 _engine.json 走
     sys.path.insert(0, BACKEND)
     import server  # noqa: E402
+    from engines.acp import agents  # noqa: E402
+    from engines.acp import service as svc_mod  # noqa: E402
+    import tempfile  # noqa: E402
+
+    # ⚠⚠ 必须把 ACP 的**落盘目录**也指到临时目录：以前只猴补丁了注册表，
+    #   结果这个测试里导入的"假 agent 会话"被写进了**真实的** runtime/state/_acp_sessions.json
+    #   （实测踩到：真文件里混进一条 agent=mock / "整理共享工作区" / 0 消息的垃圾）。
+    tmpdir = tempfile.mkdtemp(prefix="acp_ui_test_")
+    svc_mod.STATE_DIR = tmpdir
+    svc_mod._ALWAYS_FILE = os.path.join(tmpdir, "_acp_always.json")
+
+    # ⚠⚠ 自定义外观（POST /appearance）也会写状态文件 —— 同样必须指到临时目录，
+    #   否则会污染真实的 runtime/state/_appearance.json（踩坑 #36 同一类坑）。
+    real_appear = os.path.join(STATE_DIR, "_appearance.json")
+    try:
+        real_appear_before = io.open(real_appear, "rb").read()
+    except OSError:
+        real_appear_before = None
+    server.APPEARANCE_FILE = os.path.join(tmpdir, "_appearance.json")
+
+    # ⚠ 以前这里改 `_acp.json` 指向假 agent，可引擎早已改成读注册表
+    #   `_acp_agents.json` → 假 agent 根本没被用上（实际连的是你真实的 Codex）。
+    #   现在改成**进程内猴补丁注册表**：不写任何配置文件，测的就是假 agent。
+    reg = {"active": "mock",
+           "baseline": {"cwd": HERE, "env": {}, "mode": "read-only"},
+           "agents": [{"id": "mock", "label": "ACP 假 agent（联调用）",
+                       "command": [sys.executable, MOCK], "cwd": HERE, "env": {},
+                       "provider": "", "note": "由 tools/acp_engine_ui_test.py 内存注入"},
+                      {"id": "mock-unavailable", "label": "缺依赖的假 agent",
+                       "command": ["definitely-not-a-real-acp-binary"], "cwd": HERE, "env": {},
+                       "provider": "", "note": "用来验证「缺：…」提示"}]}
+    agents.load_registry = lambda: reg
+    agents.save_registry = lambda r: None
 
     os.makedirs(STATE_DIR, exist_ok=True)
     old_engine = None
@@ -148,8 +303,6 @@ def main() -> int:
     except OSError:
         pass
     io.open(ENGINE_FILE, "w", encoding="utf-8").write('{"engine": "opencode"}')
-    io.open(ACF_FILE, "w", encoding="utf-8").write(
-        json.dumps({"command": [sys.executable, MOCK], "cwd": HERE}, ensure_ascii=False))
 
     build_probe()
     httpd = server.Server(("127.0.0.1", PORT), server.Handler)
@@ -172,10 +325,6 @@ def main() -> int:
             io.open(ENGINE_FILE, "w", encoding="utf-8").write(old_engine)
         else:
             io.open(ENGINE_FILE, "w", encoding="utf-8").write('{"engine": "opencode"}')
-        try:
-            os.remove(ACF_FILE)
-        except OSError:
-            pass
 
     m = re.search(r'<pre id="__probe__">(.*?)</pre>', html, re.S)
     if not m:
@@ -188,21 +337,107 @@ def main() -> int:
     print("  下拉选项    :", d.get("options"))
     print("  初始值/禁用 :", d.get("value"), "/", d.get("disabled"))
     print("  初始说明    :", d.get("note0"))
+    print("  引擎自述    :", d.get("engines"))
+    print("  未就绪渲染  :", d.get("optHtml2"))
     print("  切到 acp    : active=%s  SSE重连=%s  说明=%s"
           % (d.get("acpActive"), d.get("acpEsDelta"), d.get("acpNote")))
     print("  切回 opencode: active=%s  SSE重连=%s" % (d.get("openActive"), d.get("openEsDelta")))
     print("  切换后标题/消息数:", d.get("title"), "/", d.get("msgCount"))
+    print("\n=== agentlist / 编辑弹窗（provider 中性化）===")
+    print("  卡片数      :", d.get("agentsRows"))
+    print("  provider状态:", d.get("agentsProviders"))
+    print("  弹窗打开    :", d.get("editOpen"), "| 预填 label/命令:", d.get("editLabel"), "/",
+          d.get("editCommand"))
+    print("  预填 provider:", repr(d.get("editProvider")))
+    print("  命令解析    :", d.get("parsed"))
+    print("  「自动」后   :", repr(d.get("guessInput")), "|", d.get("guessMsg"))
+    print("  保存后 provider:", repr(d.get("savedProvider")), "| 弹窗已关:", d.get("editClosed"))
+    print("  卡片有「改」按钮:", d.get("badgeInHtml"))
+    print("  --- 智能体 / 模式切换 ---")
+    print("  弹窗打开/行数/已标记:", d.get("modeOpen"), "/", d.get("modeRows"), "/", d.get("modeMarked"))
+    print("  说明:", d.get("modeCur"))
+    print("  切一下后：弹窗关闭:", d.get("modeClosed"), "| 按钮", d.get("modeBtnBefore"), "->", d.get("modeBtnAfter"))
+    print("  按钮宽度:", d.get("modeBtnW"), "px（>34 才算放开了方图标宽度）| 被截断:", d.get("modeBtnClipped"))
+    print("  --- 从 agent 导入会话 ---")
+    print("  按钮可见/弹窗打开:", d.get("impBtnVisible"), "/", d.get("impOpen"), "| 列表:", d.get("impCur"))
+    print("  行数:", d.get("impRows"), "| 点一下后弹窗关闭:", d.get("impClosed"),
+          "| 面板会话 +", d.get("impDelta"), "| 当前:", d.get("impCurSession"))
+    print("  --- 模型 API Key ---")
+    print("  Key 行/只读变量名/输入框数:",
+          d.get("keyRowThere"), "/", d.get("keyNamePrefilled"), "/", d.get("keyNameInputs"))
+    print("  保存后提示:", d.get("keyNote"))
+    print("  只回掩码（无明文）:", d.get("keyMasked"), "| 值已清空:", d.get("keyValueCleared"))
+    print("  清除后提示:", d.get("keyClearedNote"))
     print("  脚本异常    :", d.get("error"), " JS错误:", d.get("jsErrors"))
 
+    # 只读断言：整个测试**没有**把假 agent 的会话写进真实状态（隔离生效）
+    real = os.path.join(HERE, "runtime", "state", "_acp_sessions.json")
+    leaked = 0
+    if os.path.isfile(real):
+        try:
+            data = json.load(open(real, encoding="utf-8"))
+            leaked = len([s for s in (data.get("sessions") or [])
+                          if str(s.get("agent") or "") == "mock"])
+        except Exception:  # noqa: BLE001
+            leaked = 0
+    print("  真实状态有没有被写进假会话:", leaked, "条（应为 0）")
+    try:
+        real_appear_after = io.open(real_appear, "rb").read()
+    except OSError:
+        real_appear_after = None
+    appear_untouched = real_appear_before == real_appear_after
+    print("  真实 _appearance.json 有没有被动过:", "没有" if appear_untouched else "★被动过")
+
     opts = d.get("options") or []
+    engs = d.get("engines") or []
     ok = (
         "acp" in opts and "opencode" in opts
         and d.get("disabled") is False
         and d.get("acpActive") == "acp" and (d.get("acpEsDelta") or 0) >= 1
         and d.get("openActive") == "opencode" and (d.get("openEsDelta") or 0) >= 1
+        # 引擎自述带 label/available（向导/设置据此标灰不可用引擎）
+        and len(engs) >= 2 and all(("label" in e and "available" in e) for e in engs)
+        # 不可用引擎：标「未就绪」+ disabled
+        and "（未就绪）" in str(d.get("optHtml2") or "")
+        and 'value="bad" disabled' in str(d.get("optHtml2") or "")
+        # 编辑弹窗：能打开、预填、命令解析正确、能保存 provider
+        and d.get("editOpen") is True
+        and d.get("parsed") == ["C:\\Program Files\\x.exe", "--flag", "a"]
+        and d.get("savedProvider") == "deepseek"
+        and d.get("editClosed") is True
+        and d.get("badgeInHtml") is True
+        # 模式切换：弹窗能开、列出可见模式、有 current 标记、点一下能切、按钮文案跟着变
+        and d.get("modeOpen") is True
+        and (d.get("modeRows") or 0) >= 2
+        and (d.get("modeMarked") or 0) >= 1
+        and d.get("modeClosed") is True
+        and (d.get("modeBtnAfter") or "") != ""
+        and (d.get("modeBtnW") or 0) > 34          # 放开 34px 方图标宽度（踩坑 #24）
+        and d.get("modeBtnClipped") is False       # 文字没被截断
+        # 从 agent 导入：按钮可见（acp 模式）、弹窗能开、列出 agent 侧会话、点一下导入并打开
+        and d.get("impBtnVisible") is True
+        and d.get("impOpen") is True
+        and (d.get("impRows") or 0) >= 2
+        and d.get("impClosed") is True
+        and (d.get("impDelta") or 0) >= 1
+        # 模型 API Key：行在、能保存、界面只拿到掩码、值框被清空
+        and d.get("keyRowThere") is True
+        and d.get("keyMasked") is True
+        and d.get("keyNameInputs") == 1          # 只有一个输入框（不再手填变量名）
+        and d.get("keyVarReadonly") is True      # 变量名是只读标签
+        # 空会话文案可改（改 SET + 立刻反映到 heroHtml）+ 自定义素材真能存取
+        and d.get("heroL1") == "测试文案一号"
+        and d.get("heroHasText") is True
+        and str(d.get("appearUrl") or "").startswith("/appearance/img?k=hero")
+        and d.get("appearName") == "sticker-duck.jpg"
+        and d.get("appearImg") == 200
+        and d.get("appearCleared") == "/assets/hero.jpg"
+        and appear_untouched
+        and d.get("keyValueCleared") is True
+        and leaked == 0
         and not d.get("error") and not d.get("jsErrors")
     )
-    print("\n  结论:", "[OK] 引擎切换与 SSE 重连都正常" if ok else "[BAD] 有问题，见上面")
+    print("\n  结论:", "[OK] 引擎切换 / SSE 重连 / agentlist 编辑 都正常" if ok else "[BAD] 有问题，见上面")
     return 0 if ok else 2
 
 

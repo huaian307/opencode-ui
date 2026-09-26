@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -21,6 +22,11 @@ import shutil
 import time
 
 from .. import STATE_DIR
+
+# 项目根（安装包里 = <app>，里面有 `agents\node\`、`agents\codex\`、`agents\claude\`）。
+# ⚠ 用 STATE_DIR 反推（= <root>\runtime\state），**别自己数 dirname 层数** ——
+#   之前写成 dirname×3 算成了 `<app>\backend`（少一层），安装版因此把自带的 node/适配器判成"缺"。
+ROOT_DIR = os.path.dirname(os.path.dirname(STATE_DIR))
 
 AGENTS_FILE = os.path.join(STATE_DIR, "_acp_agents.json")
 LEGACY_FILE = os.path.join(STATE_DIR, "_acp.json")
@@ -53,18 +59,93 @@ def _codex_defaults(legacy: dict) -> list:
     node_cmd = ([node, npx, "-y", "@agentclientprotocol/codex-acp"]
                 if (node and npx) else ["npx", "-y", "@agentclientprotocol/codex-acp"])
     cwd = legacy.get("cwd") or ""
+    # ⚠ 中性化：这里**不塞** `OPENAI_API_KEY` 那种预设，也不假设"必须登录 OpenAI" ——
+    #   Codex 可以指向任意 provider（本机就是直连 DeepSeek，见 CODEX_HOME/config.toml）。
+    #   provider 留空，由 guess_provider() 从 env / command / config.toml 推断。
     return [
         {"id": "codex-node", "label": "Codex · Node 适配器", "builtin": True,
-         "command": node_cmd, "cwd": cwd, "env": {"OPENAI_API_KEY": ""},
-         "note": "npm 适配器 @agentclientprotocol/codex-acp；需联网 + 已登录 Codex（或用 OPENAI_API_KEY）"},
+         "command": node_cmd, "cwd": cwd, "env": {},
+         "note": "npm 适配器 @agentclientprotocol/codex-acp；provider 由它的 config.toml / env 推断"},
         {"id": "codex-client", "label": "Codex · 本机客户端", "builtin": True,
          "command": ["codex-acp"], "cwd": cwd, "env": {},
          "note": "指向本机 codex-acp 可执行文件（GitHub Releases 下载后填绝对路径），或你的 Codex 客户端命令"},
     ]
 
 
+def _adapter_entry(pkg: str, prefer: str = "dist/index.js") -> str:
+    """在常见 npm 安装位置里找某个包的**入口 JS**（优先 `prefer`，其次 package.json 的 bin）。
+
+    用途：codex / claude 这些"适配器是 JS、需要 node 跑"的 agent 都要定位入口。
+    """
+    name = "\\" + pkg.replace("/", "\\").lower()
+    for base in _search_dirs():
+        if not base or not os.path.isdir(base):
+            continue
+        d0 = base.rstrip("\\/").count(os.sep)
+        for root, subdirs, files in os.walk(base):
+            if root.count(os.sep) - d0 > 6:
+                subdirs[:] = []
+                continue
+            if not root.replace("/", "\\").lower().endswith(name):
+                continue
+            p = os.path.join(root, *prefer.split("/"))
+            if os.path.isfile(p):
+                return p
+            pj = os.path.join(root, "package.json")     # 布局变了就照着 package.json 的 bin 找
+            if os.path.isfile(pj):
+                try:
+                    meta = json.load(open(pj, encoding="utf-8"))
+                    bins = meta.get("bin") or {}
+                    if isinstance(bins, str):
+                        bins = {str(meta.get("name") or "bin").split("/")[-1]: bins}
+                    for rel in (bins.values() if isinstance(bins, dict) else []):
+                        cand = os.path.join(root, str(rel))
+                        if os.path.isfile(cand):
+                            return cand
+                except Exception:  # noqa: BLE001
+                    pass
+    return ""
+
+
+def _claude_defaults(legacy: dict) -> list:
+    """Claude Code 的两个候选 —— **与 `_codex_defaults()` 完全同构**。
+
+    - `claude-node`：本地 npm 安装的 `@zed-industries/claude-code-acp` 适配器（用便携 node 跑）
+    - `claude-client`：本机 `claude-code-acp` 命令（用户自己装在 PATH 上的）
+
+    ⚠ 我们**不随包/不下载 Claude Code 本体**：适配器只是"ACP ↔ Claude Code"的翻译层，
+      它调用的是**目标机器上已登录的 Claude Code**（也可以在 baseline.env 里配 `ANTHROPIC_API_KEY`）。
+      所以"缺 Claude Code CLI"会像 codex 缺 Codex CLI 一样，明确显示在 `missing` 里。
+    ⚠ 中性化：不写死 provider —— 由 `guess_provider()` 从 label/命令/env 推断（"claude" → anthropic）。
+    """
+    node = _node_from(legacy)
+    npx = ""
+    if node:
+        cand = os.path.join(os.path.dirname(node), "node_modules", "npm", "bin", "npx-cli.js")
+        if os.path.isfile(cand):
+            npx = cand
+    node_cmd = ([node, npx, "-y", "@zed-industries/claude-code-acp"]
+                if (node and npx) else ["npx", "-y", "@zed-industries/claude-code-acp"])
+    cwd = legacy.get("cwd") or ""
+    return [
+        {"id": "claude-node", "label": "Claude Code · Node 适配器", "builtin": True,
+         "command": node_cmd, "cwd": cwd, "env": {},
+         "note": "npm 适配器 @zed-industries/claude-code-acp；用本机 Claude Code 的登录"
+                 "（也可在 baseline.env 配 ANTHROPIC_API_KEY）"},
+        {"id": "claude-client", "label": "Claude Code · 本机客户端", "builtin": True,
+         "command": ["claude-code-acp"], "cwd": cwd, "env": {},
+         "note": "指向本机 claude-code-acp 可执行文件，或你的 Claude Code 客户端命令"},
+    ]
+
+
 def bootstrap() -> dict:
-    """没有注册表时，从 _acp.json 生成一份（含 Codex 候选）并落盘。"""
+    """没有注册表时，从 _acp.json 生成一份（含 Codex / Claude 候选）并落盘。
+
+    ⚠ 中性化：**不预设"默认用哪个"**。先自动补全命令，再在**真的可用**的 agent 里挑第一个
+      当 active；一个都不可用就留空（`active_agent()` 会回落到列表第一个，但界面会显示"没选"）。
+       以前这里直接 `active = agents[0]`，而 `agents[0]` 往往是旧 `_acp.json` 收进来的 dsh
+       → 新装用户的默认 ACP agent 被绑死成 DeepSeek Harness，这不是中性。
+    """
     legacy = _read_json(LEGACY_FILE)
     agents = []
     if legacy.get("command"):
@@ -74,13 +155,30 @@ def bootstrap() -> dict:
             "env": legacy.get("env") or {}, "note": "来自旧的 _acp.json 配置",
         })
     agents.extend(_codex_defaults(legacy))
-    reg = {"active": agents[0]["id"] if agents else "", "agents": agents}
+    agents.extend(_claude_defaults(legacy))
+    reg = {"active": "", "agents": agents}
     save_registry(reg)
     try:
         reg = autofill(reg)["registry"]     # 首次就自动检测本机的 node / codex / dsh 位置
+        for a in (reg.get("agents") or []):  # 顺手补 provider（能认出来就填）
+            if not a.get("provider"):
+                a["provider"] = guess_provider(a)
     except Exception:  # noqa: BLE001
         pass
-    return reg
+    det = {}
+    try:
+        det = detect_all_cached()
+    except Exception:  # noqa: BLE001
+        pass
+    pick = next((str(a.get("id")) for a in (reg.get("agents") or [])
+                 if status_of(a, det)["available"]), "")
+    reg["active"] = pick
+    save_registry(reg)
+    try:
+        ensure_opencode_agent()        # 顺手补「子命令式 ACP」（本机装了 OpenCode 才有）
+    except Exception:  # noqa: BLE001
+        pass
+    return load_registry()             # 重新读，让调用方看到自愈后的结果
 
 
 def load_registry() -> dict:
@@ -95,6 +193,13 @@ def save_registry(reg: dict) -> None:
     tmp = AGENTS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(reg, fh, ensure_ascii=False, indent=2)
+    # ⚠ 先留一份上一版（`.bak`）：本文件被误写（我把假注册表喂给 autofill 过，实测覆盖过一次
+    #   真实配置）时，至少还有一份能捞回来。只保留一个版本，够用又不占地方。
+    try:
+        if os.path.isfile(AGENTS_FILE):
+            shutil.copy2(AGENTS_FILE, AGENTS_FILE + ".bak")
+    except Exception:  # noqa: BLE001
+        pass
     os.replace(tmp, AGENTS_FILE)
 
 
@@ -125,6 +230,197 @@ def _slug(label: str) -> str:
     return (s[:24] or "agent")
 
 
+# ---------------- 「子命令式」ACP（CLI 的 `acp` 子命令）----------------
+#
+# 有些 agent 的 ACP 不是单独的可执行文件，而是**主 CLI 的一个子命令**。
+# 已知：OpenCode —— `opencode-cli.exe acp` 是一个完整的 ACP v1 server
+#   （实测 2026-09-26：agentInfo={"name":"OpenCode","version":"2.0.13"}、
+#    sessionCapabilities 含 list/resume/close/delete/fork、promptCapabilities 含 image，
+#    能正常 `session/new` + `session/prompt`）。
+# ⚠ 这类命令**文件名里没有 acp**、也不是 node 包，所以老的两条识别规则（`*acp*.exe` /
+#   node 包 bin 名含 acp）永远扫不到 —— 这就是"OpenCode 明明在本机、ACP 却找不到它"的原因。
+_SUBCOMMAND_ACP = [
+    {"id": "opencode-acp", "label": "OpenCode · ACP（子命令）",
+     "exe_names": ("opencode-cli.exe", "opencode.exe", "opencode"),
+     "args": ["acp"],
+     "mode": "plan",                 # OpenCode 的只读模式（见 docs/ACP.md 第 8 节）
+     "note": "OpenCode 自带 ACP server（`opencode-cli.exe acp`）：模型清单很全，"
+             "支持 session list/resume/close/delete/fork"},
+]
+
+
+def ensure_opencode_agent() -> str:
+    """注册表里还没有「子命令式 ACP」（如 opencode-acp）就补一个；返回新增的 id，没动就回 ""。
+
+    为什么要有这个"自愈"：`packaging/init_state.py` 只在**安装那一刻**探测一次 —— 而那一刻
+    可能正好摸不到（环境变量不全 / `_walk_find` 撞上文件数上限 / 链接还没就绪 …… 本机实测
+    就漏过：装完只有 codex-bundled + claude-node，OpenCode 明明在却不在 agentlist 里）。
+    放到**每次面板启动**再补一次，就不再依赖那一次运气。
+    """
+    try:
+        cmd = find_subcommand_acp()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not cmd:
+        return ""
+    spec = _spec_for_command(cmd) or {}
+    reg = load_registry()
+    key = " ".join(str(x) for x in cmd).lower().strip()
+    for a in (reg.get("agents") or []):
+        same = " ".join(str(x) for x in (a.get("command") or [])).lower().strip() == key
+        if same or (spec and str(a.get("id")) == str(spec.get("id"))):
+            return ""                                  # 已经有它了，什么都不做
+    new = add_agent(str(spec.get("label") or "OpenCode · ACP（子命令）"), list(cmd), "",
+                    {}, str(spec.get("note") or "OpenCode 自带 ACP server"), "")
+    aid = str(new.get("id") or "")
+    if not aid:
+        return ""
+    reg = load_registry()                              # ⚠ add_agent 已经落盘 → 重新读，别拿旧 dict 覆盖
+    a = find_agent(reg, aid)
+    if a:
+        a["builtin"] = True                            # 内置的不给删
+        if spec.get("mode"):
+            a["mode"] = str(spec["mode"])
+        if not a.get("provider"):
+            a["provider"] = guess_provider(a)
+        save_registry(reg)
+    return aid
+
+
+def find_subcommand_acp(dirs=None, limit: int = 6) -> list:
+    """在给定目录（默认 `_search_dirs()` + PATH）里找"带 acp 子命令"的 CLI。
+
+    返回启动命令 `[<exe 真实路径>, "acp"]`；找不到回 `[]`。
+    ⚠ 路径一律走 `os.path.realpath`：本机 OpenCode 在 D:，而 C: 那个
+      `@opencodedesktop` 是指向它的 junction —— 不归一化就会"同一个 exe 扫出两条"。
+    """
+    bases = list(dirs) if dirs else (list(_search_dirs())
+                                     + [os.path.dirname(shutil.which("opencode") or "")])
+    for spec in _SUBCOMMAND_ACP:
+        for name in spec["exe_names"]:
+            p = shutil.which(name) or ""
+            if not p:
+                p = _walk_find([b for b in bases if b], (name,), max_depth=4)
+            if p and os.path.isfile(p):
+                return [os.path.realpath(p)] + list(spec["args"])
+    return []
+
+
+def _spec_for_command(cmd):
+    """命令是不是某个已知「子命令式 ACP」规格（按 exe 名 + 子命令比对）。"""
+    if not cmd:
+        return None
+    exe = os.path.basename(str(cmd[0])).lower()
+    tail = [str(x).lower() for x in (cmd[1:] or [])]
+    for spec in _SUBCOMMAND_ACP:
+        if exe in tuple(str(n).lower() for n in spec["exe_names"]) and tail == list(spec["args"]):
+            return spec
+    return None
+
+
+# ---------------- provider 推断（只用于模型图标 / 分组，认不出就留空）----------------
+#
+# 中性化的要求是「没有 provider 也能跑」：模型清单照常返回、图标回落到字母徽章。
+# 但能认出来时填上更好（品牌图标 + 分组名）。识别依据按可靠性排序：
+#   ① 显式配置的 provider  → ② agent 自己的 env / command 里的主机名或 API key 名
+#   → ③ Codex 的 `CODEX_HOME/config.toml` 里的 model_providers（base_url / env_key）
+# ⚠ 只扫 **agent 自己的 env**，不扫共享基线（否则所有 agent 都会被同一个 key 带偏）。
+_PROVIDER_HINTS = [
+    ("deepseek", ("deepseek", "DEEPSEEK_API_KEY")),
+    ("openai", ("api.openai.com", "OPENAI_API_KEY", "openai")),
+    ("anthropic", ("anthropic", "claude", "ANTHROPIC_API_KEY")),
+    ("google", ("generativelanguage", "GEMINI_API_KEY", "GOOGLE_API_KEY")),
+    ("xai", ("api.x.ai", "XAI_API_KEY", "grok")),
+    ("moonshotai", ("moonshot", "MOONSHOT_API_KEY", "kimi")),
+    ("zhipuai", ("bigmodel.cn", "zhipu", "ZHIPUAI_API_KEY")),
+    ("alibaba", ("dashscope", "DASHSCOPE_API_KEY")),
+    ("mistral", ("mistral", "MISTRAL_API_KEY")),
+    ("groq", ("api.groq.com", "GROQ_API_KEY")),
+]
+
+
+def _kw_hit(text: str, kw: str) -> bool:
+    """关键词命中（大小写不敏感，但必须是**整词**：前后不能是字母/数字）。
+
+    ⚠ 为什么要整词：本机便携 node 的路径里有 `D:\\agentlist\\deepseekharness\\...`，
+      子串匹配会把"路径里带 deepseek 目录名"的 agent 一律判成 deepseek（实测踩到：
+      `claude-node` 被 autofill 换成便携 node 的绝对路径后，provider 变成了 deepseek）。
+    """
+    low, k = str(text or "").lower(), str(kw or "").lower()
+    if not k:
+        return False
+    i = low.find(k)
+    while i >= 0:
+        before = low[i - 1] if i > 0 else ""
+        after = low[i + len(k)] if (i + len(k)) < len(low) else ""
+        if not before.isalnum() and not after.isalnum():
+            return True
+        i = low.find(k, i + 1)
+    return False
+
+
+def provider_from_text(blob: str) -> str:
+    """从任意文本里认 provider（主机名 / API key 名 / 品牌词）。认不出回空字符串。"""
+    low = str(blob or "")
+    if not low.strip():
+        return ""
+    for pid, keys in _PROVIDER_HINTS:
+        if any(_kw_hit(low, k) for k in keys):
+            return pid
+    return ""
+
+
+def _provider_from_codex_home(codex_home: str) -> str:
+    """读 Codex 的 `config.toml`（base_url / env_key）猜 provider。"""
+    try:
+        p = os.path.join(str(codex_home), "config.toml")
+        if not os.path.isfile(p):
+            return ""
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            return provider_from_text(fh.read())
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def guess_provider(a: dict) -> str:
+    """猜这个 agent 背后是哪家模型。**已配的 provider 优先**；认不出就回空（中性）。
+
+    ⚠ 只看**有值**的 env（`OPENAI_API_KEY: ""` 这种占位键不算依据）——否则一个空的
+      OPENAI_API_KEY 就会把任意 agent 猜成 openai。
+    """
+    if not isinstance(a, dict):
+        return ""
+    if str(a.get("provider") or "").strip():
+        return str(a["provider"]).strip()
+    env = a.get("env") if isinstance(a.get("env"), dict) else {}
+    # 键名与值都只在「有值」时才参与判断
+    env_bits = []
+    for k, v in env.items():
+        if str(v or "").strip():
+            env_bits.append(str(k))
+            env_bits.append(str(v))
+    # ⚠ 命令只看**文件名**：绝对路径里的目录名（如 …\deepseekharness\…）不该当 provider 线索
+    cmd_bits = []
+    for x in (a.get("command") or []):
+        sx = str(x)
+        cmd_bits.append(os.path.basename(sx) if (os.sep in sx or "/" in sx) else sx)
+    blob = " ".join([
+        " ".join(cmd_bits),
+        " ".join(env_bits),
+        str(a.get("id") or ""), str(a.get("label") or ""), str(a.get("note") or ""),
+    ])
+    hit = provider_from_text(blob)
+    if hit:
+        return hit
+    for key in ("CODEX_HOME", "codex_home"):
+        v = env.get(key)
+        if v and str(v).strip():
+            hit = _provider_from_codex_home(str(v))
+            if hit:
+                return hit
+    return ""
+
+
 def _node_exe() -> str:
     """找一个可用的 node.exe（优先注册表里便携 Node 那条）。"""
     for a in (load_registry().get("agents") or []):
@@ -137,14 +433,20 @@ def _node_exe() -> str:
 def infer_from_dir(d: str) -> tuple:
     """从一个目录推断怎么启动其中的 ACP agent。返回 (command|None, note)。
 
-    认得两种常见形态：
+    认得三种常见形态：
       - node 包：`node_modules/.../package.json` 的 bin 里有含 "acp" 的入口（如 @agentclientprotocol/codex-acp）
       - 可执行文件：目录（或其一层子目录）里的 `*acp*.exe`
+      - **子命令式**：目录里是已知"自带 acp 子命令"的 CLI（如 `opencode-cli.exe acp`）
+        ⚠ 这种文件名里没有 "acp"、也不是 node 包，只靠前两条永远扫不到（2026-09-26 用户问到才补）
     """
     d = os.path.normpath(str(d or ""))
     if not d or not os.path.isdir(d):
         return None, ""
     node = _node_exe()
+    # ③ 已知的子命令式 ACP（先判，免得被下面的 node 包规则盖掉）
+    hit = find_subcommand_acp([d])
+    if hit:
+        return hit, "子命令式 ACP：%s" % os.path.basename(str(hit[0]))
     nm = os.path.join(d, "node_modules")
     if os.path.isdir(nm):
         for scope in sorted(os.listdir(nm)):
@@ -199,7 +501,16 @@ def scan_candidates(limit: int = 12) -> list:
     def push(label, cmd, where, note):
         if not cmd:
             return
-        key = " ".join(str(x) for x in cmd).lower().strip()
+        # ⚠ 去重键用「真实路径」：本机 C: 的 @opencodedesktop 是 D: 的 junction，
+        #    不归一化的话同一个 exe 会被当成两条候选（路径文本不同）。
+        norm = []
+        for x in cmd:
+            sx = str(x)
+            if os.path.isabs(sx) or ("\\" in sx) or ("/" in sx):
+                norm.append(os.path.realpath(sx).lower())
+            else:
+                norm.append(sx.lower())
+        key = " ".join(norm).strip()
         if key in have_cmds or key in seen:
             return
         seen.add(key)
@@ -211,7 +522,9 @@ def scan_candidates(limit: int = 12) -> list:
         st = status_of({"id": cid, "command": cmd})
         out.append({"id": cid, "label": label, "command": cmd, "cwd": "",
                     "dir": where, "note": note, "available": st["available"],
-                    "missing": st["missing"]})
+                    "missing": st["missing"],
+                    "provider": guess_provider({"id": cid, "label": label, "command": cmd,
+                                                "note": note, "env": {}})})
 
     # ① PATH 上常见的 ACP 适配器
     for name in ("codex-acp", "claude-code-acp", "gemini", "goose", "crush", "amp-acp", "iflow"):
@@ -227,7 +540,8 @@ def scan_candidates(limit: int = 12) -> list:
                 continue
             cmd, note = infer_from_dir(p)
             if cmd:
-                push(d, cmd, p, note)
+                spec = _spec_for_command(cmd)
+                push((spec or {}).get("label") or d, cmd, p, (spec or {}).get("note") or note)
     # ③ 全局 npm bin 里的 *acp* 命令（npx/npm -g 装的适配器）
     for nmdir in (os.path.join(os.environ.get("APPDATA", ""), "npm"),
                   os.path.join(os.path.expanduser("~"), ".local", "bin")):
@@ -237,12 +551,27 @@ def scan_candidates(limit: int = 12) -> list:
             low = f.lower()
             if "acp" in low and low.endswith((".exe", ".cmd")) and not low.endswith(".ps1"):
                 push(f, [os.path.join(nmdir, f)], nmdir, "全局命令")
+    # ④ 子命令式 ACP：CLI 的 `acp` 子命令（如 `opencode-cli.exe acp`）
+    #    ⚠ 这条是为 OpenCode 补的：它自带完整 ACP server，但文件名里没有 "acp"、
+    #      也不是 node 包，前三条规则永远扫不到。
+    for spec in _SUBCOMMAND_ACP:
+        cmd = find_subcommand_acp()
+        if cmd:
+            push(spec["label"], cmd, os.path.dirname(str(cmd[0])), spec["note"])
+    # ⑤ Claude Code（与 codex 同构：本地 npm 适配器 + 本机客户端）
+    det = detect_all_cached()
+    if det.get("node") and det.get("claudeAdapter"):
+        push("Claude Code · Node 适配器", [det["node"], det["claudeAdapter"]],
+             os.path.dirname(det["claudeAdapter"]),
+             "本地 npm 安装的 @zed-industries/claude-code-acp")
+    if det.get("claudeAcpExe"):
+        push("Claude Code · 本机客户端", [det["claudeAcpExe"]],
+             os.path.dirname(det["claudeAcpExe"]), "PATH 上找到")
     return out[:limit]
-    s = re.sub(r"[^a-z0-9]+", "-", str(label or "").lower()).strip("-")
-    return (s[:24] or "agent")
 
 
-def add_agent(label: str, command, cwd: str = "", env: dict = None, note: str = "") -> dict:
+def add_agent(label: str, command, cwd: str = "", env: dict = None, note: str = "",
+              provider: str = "") -> dict:
     """用户自己添加一个 agent（label + command 必填）。id 由 label 生成、重名自动加序号。"""
     cmd = [str(x) for x in (command or []) if str(x).strip()]
     if not cmd:
@@ -259,7 +588,10 @@ def add_agent(label: str, command, cwd: str = "", env: dict = None, note: str = 
         aid = "%s-%d" % (_slug(label), n)
         n += 1
     a = {"id": aid, "label": str(label or aid), "command": cmd,
-         "cwd": cwd or "", "env": env or {}, "note": note or "用户添加"}
+         "cwd": cwd or "", "env": env or {}, "note": note or "用户添加",
+         "provider": str(provider or "")}
+    if not a["provider"]:                      # 没手填 → 从命令/env 猜一个（猜不出就留空）
+        a["provider"] = guess_provider(a)
     reg.setdefault("agents", []).append(a)
     save_registry(reg)
     return a
@@ -288,12 +620,48 @@ def set_active(aid: str) -> bool:
     return True
 
 
+def update_baseline_env(patch: dict) -> dict:
+    """合并**共享基线**的环境变量（模型 API Key 这类"所有 agent 共用"的东西）。
+
+    - `patch = {"DEEPSEEK_API_KEY": "sk-..."}` → 写入/覆盖；
+    - 值为 `None` 或空字符串 → **删除**该变量；
+    - 返回更新后的 baseline（`env` 里就是明文，调用方负责别回显）。
+    这是安装包"填 Key"的落点：`runtime/state/_acp_agents.json` 的 `baseline.env`
+    （只在**本机**，不进仓库、不进安装包）。
+    """
+    reg = load_registry()
+    b = reg.get("baseline") if isinstance(reg.get("baseline"), dict) else {}
+    env = dict(b.get("env") or {})
+    for k, v in (patch or {}).items():
+        k = str(k or "").strip()
+        if not k:
+            continue
+        if v is None or str(v).strip() == "":
+            env.pop(k, None)
+        else:
+            env[k] = str(v).strip()
+    b["env"] = env
+    reg["baseline"] = b
+    save_registry(reg)
+    return b
+
+
+def mask_secret(value: str) -> str:
+    """给界面看的"掩码"：只露头 4 位 + 长度，绝不出明文。"""
+    s = str(value or "")
+    if not s:
+        return ""
+    if len(s) <= 8:
+        return "•" * len(s)
+    return "%s…%s（%d 位）" % (s[:4], s[-2:], len(s))
+
+
 def update_agent(aid: str, patch: dict) -> dict:
     reg = load_registry()
     a = find_agent(reg, aid)
     if not a:
         return {}
-    for k in ("label", "command", "cwd", "env", "note"):
+    for k in ("label", "command", "cwd", "env", "note", "provider", "mode"):
         if k in patch and patch[k] is not None:
             a[k] = patch[k]
     save_registry(reg)
@@ -315,6 +683,10 @@ def cmd_available(command) -> bool:
 _CODEX_NAMES = ("codex.exe", "codex.cmd", "codex.bat", "codex")
 _CODEX_ACP_NAMES = ("codex-acp.exe", "codex-acp.cmd", "codex-acp")
 _CODEX_ACP_EXE = ("codex-acp.exe",)
+# Claude Code（与 codex 同构）：`claude` = 客户端本体；`claude-code-acp` = ACP 适配器
+_CLAUDE_NAMES = ("claude.exe", "claude.cmd", "claude.bat", "claude")
+_CLAUDE_ACP_NAMES = ("claude-code-acp.exe", "claude-code-acp.cmd", "claude-code-acp")
+_CLAUDE_ACP_EXE = ("claude-code-acp.exe",)
 
 
 def _search_dirs() -> list:
@@ -329,6 +701,10 @@ def _search_dirs() -> list:
         os.path.join(la, "Programs"),
         os.path.join(la, "Microsoft", "WindowsApps"),
         os.path.join(local_root(), "agentlist"),
+        # 安装包自带的 agent 目录（node 单独放前面：那个目录里 claude/codex 文件多，
+        # 走 _walk_find 时可能在找到 node.exe 之前就撞上文件数上限）
+        os.path.join(ROOT_DIR, "agents", "node"),
+        os.path.join(ROOT_DIR, "agents"),
     ]
     return [d for d in cands if d]
 
@@ -359,6 +735,41 @@ def _walk_find(dirs, names, max_depth=3, limit=4000) -> str:
     return ""
 
 
+def _has_claude_auth(det: dict = None) -> bool:
+    """本机有没有 Claude 的登录态（`~/.claude` / `~/.claude.json`）或 API Key 线索。
+
+    ⚠ 只判断"能不能跑起来"的前置之一；真正的 auth 在运行时（适配器用 SDK 自带的 CLI + 登录态）。
+    """
+    if det and (det.get("claude") or det.get("claudeAcp")):
+        return True
+    home = os.path.expanduser("~")
+    if os.path.isdir(os.path.join(home, ".claude")) or os.path.isfile(os.path.join(home, ".claude.json")):
+        return True
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def _glob_node_exe() -> str:
+    """定点找便携 node（`_walk_find` 会被 D:\\agentlist 这种大目录吃光文件上限，实测踩到）。
+
+    试的顺序：同盘 `agentlist\\*\\node\\*\\node.exe`（本机 deepseekharness 就是这种）→
+    同盘 `agentlist\\*\\node.exe` → 系统安装位置。
+    """
+    root = local_root()
+    pats = [
+        os.path.join(ROOT_DIR, "agents", "node", "node.exe"),      # 安装包自带的那份（最确定）
+        os.path.join(root, "agentlist", "*", "node", "*", "node.exe"),
+        os.path.join(root, "agentlist", "*", "*", "node", "*", "node.exe"),
+        os.path.join(root, "agentlist", "*", "node.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "nodejs", "node.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "nodejs", "node.exe"),
+    ]
+    for pat in pats:
+        hits = sorted(glob.glob(pat))
+        if hits:
+            return hits[0]
+    return ""
+
+
 def _find_dsh_bin() -> str:
     legacy = _read_json(LEGACY_FILE)
     for a in (legacy.get("command") or []):
@@ -378,12 +789,14 @@ def _find_dsh_bin() -> str:
 
 
 def detect_all() -> dict:
-    """扫描本机，找出 node / npx / codex / codex-acp / dsh-acp / codex-acp 适配器的位置。"""
+    """扫描本机，找出 node / npx / codex / codex-acp / claude / claude-code-acp / dsh-acp 的位置。"""
     node = shutil.which("node") or ""
     if not node:
         node = _walk_find([os.path.join(local_root(), "agentlist"),
                            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")],
-                          ("node.exe",), max_depth=4)
+                          ("node.exe",), max_depth=4, limit=12000)
+    if not node:
+        node = _glob_node_exe()      # 定点找便携 node（见下：大目录会把 _walk_find 的文件上限吃光）
     npx = ""
     if node:
         cand = os.path.join(os.path.dirname(node), "node_modules", "npm", "bin", "npx-cli.js")
@@ -397,34 +810,31 @@ def detect_all() -> dict:
         "codexAcpExe": _walk_find(dirs, _CODEX_ACP_EXE),      # 只认真 exe（.cmd 需要 node 在 PATH）
         "codexAdapter": _find_codex_adapter(),                 # 本地 npm 安装的适配器入口
         "dsh": _find_dsh_bin(),
+        # Claude Code：与 codex 完全同构（客户端本体 + 适配器 + 本地 npm 安装的适配器入口）
+        "claude": shutil.which("claude") or _walk_find(dirs, _CLAUDE_NAMES),
+        "claudeAcp": shutil.which("claude-code-acp") or _walk_find(dirs, _CLAUDE_ACP_NAMES),
+        "claudeAcpExe": _walk_find(dirs, _CLAUDE_ACP_EXE),
+        "claudeAdapter": _adapter_entry("@zed-industries/claude-code-acp"),
     }
 
 
 def _find_codex_adapter() -> str:
     """找本地 npm 安装的 @agentclientprotocol/codex-acp 入口（dist/index.js）。"""
-    for base in _search_dirs():
-        if not base or not os.path.isdir(base):
-            continue
-        d0 = base.rstrip("\\/").count(os.sep)
-        for root, subdirs, files in os.walk(base):
-            if root.count(os.sep) - d0 > 6:
-                subdirs[:] = []
-                continue
-            low = root.replace("/", "\\").lower()
-            if low.endswith("node_modules\\@agentclientprotocol\\codex-acp\\dist") and "index.js" in files:
-                return os.path.join(root, "index.js")
-    return ""
+    return _adapter_entry("@agentclientprotocol/codex-acp")
 
 
-def autofill(reg: dict = None) -> dict:
+def autofill(reg: dict = None, save: bool = True) -> dict:
     """补全「命令不可用」的 agent；另外把 codex-node 从 npx 形态升级成本地适配器。
 
     可用的一律不动（尊重用户手填），只有两种情况会改：
       ① 命令的第一个词找不到；② codex-node 还在用 npx 形态但本地已经装了适配器。
+    另外**只补空着的 provider**（猜出来的品牌，用于模型图标）；已配的绝不覆盖。
+    ⚠ `save=False`：只算不落盘（测试/探针传假注册表时必须用，否则会覆盖真实配置 —— 实测踩过）。
     """
     reg = reg or load_registry()
     det = detect_all()
     changed = []
+    filled = []
     for a in (reg.get("agents") or []):
         aid = str(a.get("id"))
         cur = a.get("command") or []
@@ -432,22 +842,36 @@ def autofill(reg: dict = None) -> dict:
             if (not cmd_available(cur)) or any("npx-cli.js" in str(x) for x in cur):
                 a["command"] = [det["node"], det["codexAdapter"]]
                 changed.append(aid)
-                continue
-        if cmd_available(cur):
-            continue
-        cmd = None
-        if aid == "codex-node" and det["node"] and det["npx"]:
-            cmd = [det["node"], det["npx"], "-y", "@agentclientprotocol/codex-acp"]
-        elif aid == "codex-client" and det.get("codexAcpExe"):
-            cmd = [det["codexAcpExe"]]
-        elif aid == "dsh" and det["node"] and det["dsh"]:
-            cmd = [det["node"], det["dsh"]]
-        if cmd:
-            a["command"] = cmd
-            changed.append(aid)
-    if changed:
+        elif aid == "claude-node" and det.get("node") and det.get("claudeAdapter"):
+            # 与 codex-node 同款：本地装了适配器就从 npx 形态升级成本地直跑
+            if (not cmd_available(cur)) or any("npx-cli.js" in str(x) for x in cur):
+                a["command"] = [det["node"], det["claudeAdapter"]]
+                changed.append(aid)
+        elif not cmd_available(cur):
+            cmd = None
+            if aid == "codex-node" and det["node"] and det["npx"]:
+                cmd = [det["node"], det["npx"], "-y", "@agentclientprotocol/codex-acp"]
+            elif aid == "codex-client" and det.get("codexAcpExe"):
+                cmd = [det["codexAcpExe"]]
+            elif aid == "claude-node" and det["node"] and det["npx"]:
+                cmd = [det["node"], det["npx"], "-y", "@zed-industries/claude-code-acp"]
+            elif aid == "claude-client" and det.get("claudeAcpExe"):
+                cmd = [det["claudeAcpExe"]]
+            elif aid == "dsh" and det["node"] and det["dsh"]:
+                cmd = [det["node"], det["dsh"]]
+            if cmd:
+                a["command"] = cmd
+                changed.append(aid)
+        if not str(a.get("provider") or "").strip():
+            g = guess_provider(a)
+            if g:
+                a["provider"] = g
+                filled.append(aid)
+    if (changed or filled) and save:
+        # ⚠ `save=False` 是给"拿假注册表做实验"的调用方（测试 / 探针）用的：
+        #   以前它们传进假 dict、这里照写不误 → 真实 _acp_agents.json 被覆盖（实测踩到）。
         save_registry(reg)
-    return {"registry": reg, "detected": det, "changed": changed}
+    return {"registry": reg, "detected": det, "changed": changed, "filledProviders": filled}
 
 
 # ---------------- 「可用」到底怎么算（按类型看真依赖）----------------
@@ -472,6 +896,10 @@ def _kind(a: dict) -> str:
         return "codex-node"
     if aid.startswith("codex-client"):
         return "codex-client"
+    if aid.startswith("claude-node"):
+        return "claude-node"
+    if aid.startswith("claude-client"):
+        return "claude-client"
     if aid.startswith("dsh"):
         return "dsh"
     return "custom"
@@ -501,6 +929,19 @@ def status_of(a: dict, det: dict = None) -> dict:
     elif kind == "codex-client":
         if not (det.get("codexAcp") or det.get("codex")):
             missing.append("codex-acp / Codex CLI")
+    elif kind == "claude-node":
+        # ⚠ 与 codex-node **不完全一样**：这个适配器依赖 `@anthropic-ai/claude-agent-sdk`，
+        #   而 SDK **自带** Claude Code 的 CLI（`cli.js`）→ 目标机器**不需要**另装 Claude Code 本体。
+        #   真正的前置是**登录态**（`~/.claude`）或 `ANTHROPIC_API_KEY`；两者都没有时给一条提示。
+        if not det.get("node"):
+            missing.append("Node")
+        if not (det.get("claudeAdapter") or det.get("npx")):
+            missing.append("适配器")
+        if not det.get("claude") and not _has_claude_auth(det):
+            missing.append("Claude Code 登录（或 ANTHROPIC_API_KEY）")
+    elif kind == "claude-client":
+        if not (det.get("claudeAcp") or det.get("claude")):
+            missing.append("claude-code-acp / Claude Code CLI")
     elif kind == "dsh":
         if not det.get("dsh"):
             missing.append("dsh-acp")
@@ -520,4 +961,10 @@ def public(a: dict, det: dict = None) -> dict:
         "builtin": bool(a.get("builtin")),
         "note": a.get("note") or "", "command": cmd,
         "cwd": a.get("cwd") or "", "hasEnv": bool(a.get("env")),
+        # provider 只用于模型图标 / 分组（中性化：没配就留空，前端走字母徽章）
+        "provider": str(a.get("provider") or ""),
+        # 审批模式（覆盖共享 baseline.mode；不同 agent 的模式名不一样，留空=用基线）
+        "mode": str(a.get("mode") or ""),
+        # 没配时给一个「猜出来的」建议（前端编辑框可一键填入；不写入注册表）
+        "providerGuess": "" if str(a.get("provider") or "").strip() else guess_provider(a),
     }

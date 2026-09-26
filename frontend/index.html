@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>絵梨衣 · OpenCode</title>
 <link rel="icon" href="/assets/opencode-ui.ico" type="image/x-icon">
-<link rel="stylesheet" href="/style.css?v=260926zd">
+<link rel="stylesheet" href="/style.css?v=260926zp">
 </head>
 <body>
 <!-- 半朽的世界树（卡塞尔学院校徽）：左半枯枝、右半生叶 —— 龙族的标志性意象，纯内联 SVG -->
@@ -52,6 +52,7 @@
 
     <div class="side-head">
       <button id="btn-new" class="primary" title="新建会话">＋ 新会话</button>
+      <button id="btn-import" title="把这个 agent 那边已有的会话领进面板" hidden>导入…</button>
       <input id="search" type="search" placeholder="搜索会话…" autocomplete="off">
     </div>
 
@@ -73,6 +74,7 @@
         <div id="session-meta" class="muted"></div>
       </div>
       <div class="actions">
+        <button id="btn-agent" class="mdl-btn" title="切换智能体 / 模式（对当前会话生效）" aria-label="切换模式">模式</button>
         <button id="btn-model" class="mdl-btn" title="切换模型（对当前会话生效）" aria-label="切换模型">模型</button>
         <button id="btn-cfg" title="设置（亮度 / 毛玻璃 / 壁纸 / 落樱 …）" aria-label="设置"><svg class="ico-gear" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94a7.5 7.5 0 0 0 .06-.94 7.5 7.5 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.3 7.3 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.24-1.12.56-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.62-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.5.38 1.04.7 1.62.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.58-.24 1.12-.56 1.62-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg></button>
         <button id="btn-theme" title="昼（白衣绯袴）/ 夜（黑纹付羽织·黄金瞳）" aria-label="切换昼夜">夜</button>
@@ -201,8 +203,20 @@
         <select id="cfg-engine"></select>
       </div>
       <div class="cfg-row" id="cfg-acp-row" hidden>
-        <label>ACP 代理<i id="cfg-acp-note">选择要驱动的 agent（Codex / dsh / …）</i></label>
+        <label>ACP 代理<i id="cfg-acp-note">选择要驱动的 agent（Codex / Claude / dsh / …）</i></label>
         <button id="cfg-acp-btn">agentlist…</button>
+      </div>
+      <div class="cfg-row wide" id="cfg-key-row">
+        <label>模型 API Key<i id="cfg-key-note">写进共享基线的环境变量；只存本机 runtime/state，不进安装包</i></label>
+        <div class="cfg-ctl">
+          <span class="cfg-key-var mono" id="cfg-key-var" title="变量名按当前 agent 的品牌自动决定（不用手填）">DEEPSEEK_API_KEY</span>
+          <input type="password" id="cfg-key-value" placeholder="sk-…（留空=清除）" autocomplete="off">
+          <button id="cfg-key-save">保存</button>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <label>首次设置<i>重新选择默认引擎 / agent / 模型</i></label>
+        <button id="cfg-setup">运行向导…</button>
       </div>
       <div class="cfg-row">
         <label>左上角名字<i>留空则恢复默认「絵梨衣」</i></label>
@@ -211,6 +225,51 @@
       <div class="cfg-row">
         <label>名字下小标签<i>留空则恢复默认题词</i></label>
         <input type="text" id="cfg-brand-sub" maxlength="40" placeholder="落尽红樱君不见，轻绘梨花泪沾衣">
+      </div>
+      <div class="cfg-row wide">
+        <label>头像 / 空会话素材<i>都能换成本机图片；「默认」= 用自带素材（只记路径，存在本机 runtime/state）</i></label>
+        <div class="cfg-ctl cfg-art">
+          <span class="cfg-art-k">左上角头像</span>
+          <button type="button" class="cfg-img-pick" data-img="brand">选择…</button>
+          <button type="button" class="cfg-img-clear" data-img="brand" title="恢复自带素材">默认</button>
+          <span class="cfg-img-name" data-img-name="brand">默认</span>
+        </div>
+        <div class="cfg-ctl cfg-art">
+          <span class="cfg-art-k">对话头像</span>
+          <button type="button" class="cfg-img-pick" data-img="avatar">选择…</button>
+          <button type="button" class="cfg-img-clear" data-img="avatar" title="恢复自带素材">默认</button>
+          <span class="cfg-img-name" data-img-name="avatar">默认</span>
+        </div>
+        <div class="cfg-ctl cfg-art">
+          <span class="cfg-art-k">空会话主图</span>
+          <button type="button" class="cfg-img-pick" data-img="hero">选择…</button>
+          <button type="button" class="cfg-img-clear" data-img="hero" title="恢复自带素材">默认</button>
+          <span class="cfg-img-name" data-img-name="hero">默认</span>
+        </div>
+        <div class="cfg-ctl cfg-art">
+          <span class="cfg-art-k">空会话贴纸·左</span>
+          <button type="button" class="cfg-img-pick" data-img="sticker1">选择…</button>
+          <button type="button" class="cfg-img-clear" data-img="sticker1" title="恢复自带素材">默认</button>
+          <span class="cfg-img-name" data-img-name="sticker1">默认</span>
+        </div>
+        <div class="cfg-ctl cfg-art">
+          <span class="cfg-art-k">空会话贴纸·右</span>
+          <button type="button" class="cfg-img-pick" data-img="sticker2">选择…</button>
+          <button type="button" class="cfg-img-clear" data-img="sticker2" title="恢复自带素材">默认</button>
+          <span class="cfg-img-name" data-img-name="sticker2">默认</span>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <label>空会话文案 · 第一行<i>留空 = 用默认那句</i></label>
+        <input type="text" id="cfg-hero-l1" maxlength="40" placeholder="这个会话还是一张白纸。">
+      </div>
+      <div class="cfg-row">
+        <label>空会话文案 · 第二行<i>留空 = 用默认那句</i></label>
+        <input type="text" id="cfg-hero-l2" maxlength="40" placeholder="Sakura ＆ 絵梨衣 のDuck">
+      </div>
+      <div class="cfg-row">
+        <label>空会话署名<i>留空 = 用默认那句</i></label>
+        <input type="text" id="cfg-hero-credit" maxlength="60" placeholder="同人图 · 仅本地自用，版权归原作者所有">
       </div>
       <div class="cfg-row">
         <label>背景亮度 · 白昼<i>会话/听歌界面的壁纸亮度，100 = 原样</i></label>
@@ -326,6 +385,38 @@
   </div>
 </div>
 
+<div id="mode" class="wp" hidden>
+  <div class="wp-box">
+    <div class="wp-head">
+      <svg class="mk" aria-hidden="true"><use href="#mk-tree"></use></svg>
+      <span class="wp-kind">模式</span><b id="mode-title">选择智能体 / 模式</b><i class="mk-cap">言灵周期表</i>
+      <button id="mode-close" class="wp-x" title="关闭">×</button>
+    </div>
+    <div class="wp-cur muted" id="mode-cur"></div>
+    <div class="wp-list" id="mode-list"></div>
+    <div class="wp-foot">
+      <span class="muted">模式是「会话属性」：OpenCode 里叫 agent（build / plan…），ACP 里是审批模式（read-only / agent…）。没选会话时 = 新会话默认</span>
+      <button id="mode-default">跟随引擎默认</button>
+    </div>
+  </div>
+</div>
+
+<div id="import" class="wp" hidden>
+  <div class="wp-box">
+    <div class="wp-head">
+      <svg class="mk" aria-hidden="true"><use href="#mk-tree"></use></svg>
+      <span class="wp-kind">会话</span><b>从这个 agent 导入会话</b><i class="mk-cap">读歌单式</i>
+      <button id="imp-close" class="wp-x" title="关闭">×</button>
+    </div>
+    <div class="wp-cur muted" id="imp-cur">读取中…</div>
+    <div class="wp-list" id="imp-list"></div>
+    <div class="wp-foot">
+      <span class="muted" id="imp-note">这些是 agent 自己记着的会话。导入只建一条索引，**历史留在 agent 那边**（ACP 没有读消息的接口），导入后直接接着聊即可</span>
+      <button id="imp-reload">重新读取</button>
+    </div>
+  </div>
+</div>
+
 <div id="agents" class="wp" hidden>
   <div class="wp-box">
     <div class="wp-head">
@@ -336,11 +427,49 @@
     <div class="wp-cur muted" id="agents-cur"></div>
     <div class="wp-list" id="agents-list"></div>
     <div class="wp-foot">
-      <span class="muted">切换会重启 ACP 子进程；命令 / 路径鼠标悬停可见</span>
+      <span class="muted">切换会重启 ACP 子进程；命令 / 路径鼠标悬停可见；provider 只影响模型图标</span>
       <button id="agents-add">＋ 新增 agent…</button>
       <button id="agents-detect">自动检测</button>
-      <button id="agents-edit">编辑当前命令…</button>
+      <button id="agents-edit">编辑当前 agent…</button>
       <button id="agents-reload">重新加载</button>
+    </div>
+  </div>
+</div>
+
+<div id="agent-edit" class="wp" hidden>
+  <div class="wp-box">
+    <div class="wp-head">
+      <svg class="mk" aria-hidden="true"><use href="#mk-tree"></use></svg>
+      <span class="wp-kind">ACP</span><b id="ae-title">编辑 Agent</b><i class="mk-cap">装备部</i>
+      <button id="ae-close" class="wp-x" title="关闭">×</button>
+    </div>
+    <div class="cfg-body">
+      <div class="cfg-row">
+        <label>名称<i>显示用；留空就用 id</i></label>
+        <input id="ae-label" type="text" autocomplete="off">
+      </div>
+      <div class="cfg-row">
+        <label>命令<i>空格分隔；含空格的路径用英文双引号包住</i></label>
+        <input id="ae-command" type="text" class="mono" autocomplete="off">
+      </div>
+      <div class="cfg-row">
+        <label>工作目录<i>留空 = 用共享基线的 cwd</i></label>
+        <input id="ae-cwd" type="text" class="mono" autocomplete="off">
+      </div>
+      <div class="cfg-row">
+        <label>Provider<i>只影响模型图标 / 分组；留空 = 中性（字母徽章）</i></label>
+        <input id="ae-provider" type="text" placeholder="deepseek / openai / anthropic…" autocomplete="off">
+        <button id="ae-guess" type="button">自动</button>
+      </div>
+      <div class="cfg-row">
+        <label>说明<i>备注，鼠标停在卡片上时可见</i></label>
+        <input id="ae-note" type="text" autocomplete="off">
+      </div>
+    </div>
+    <div class="wp-foot">
+      <span class="muted" id="ae-msg">改命令 / provider 会重启这个 agent 的子进程</span>
+      <button id="ae-save">保存</button>
+      <button id="ae-cancel">取消</button>
     </div>
   </div>
 </div>
@@ -362,6 +491,45 @@
   </div>
 </div>
 
+<div id="setup" class="wp" hidden>
+  <div class="wp-box">
+    <div class="wp-head">
+      <svg class="mk" aria-hidden="true"><use href="#mk-tree"></use></svg>
+      <span class="wp-kind">首次设置</span><b>选择默认对话引擎</b><i class="mk-cap">装备部</i>
+      <button id="setup-close" class="wp-x" title="稍后再说">×</button>
+    </div>
+    <div class="wp-cur muted" id="setup-cur">选一个引擎；以后可在设置里重跑这个向导。</div>
+    <div class="cfg-body">
+      <div class="cfg-row">
+        <label>对话引擎<i>OpenCode 需要本机已安装；ACP 需要可用的 agent 适配器</i></label>
+        <select id="setup-engine"></select>
+      </div>
+      <div class="cfg-row" id="setup-agent-row" hidden>
+        <label>ACP Agent<i>选一个能用的 agent；没有就先「跳过」，在设置里添加</i></label>
+        <select id="setup-agent"></select>
+      </div>
+      <div class="cfg-row" id="setup-model-row" hidden>
+        <label>默认模型<i>新会话默认使用它；ACP 没有会话时先建一条会话来取清单</i></label>
+        <select id="setup-model"></select>
+      </div>
+      <div class="cfg-row wide" id="setup-key-row" hidden>
+        <label>模型 API Key<i id="setup-key-note">没有 Key 时 agent 会回「Missing environment variable」。只存本机，不进安装包</i></label>
+        <div class="cfg-ctl">
+          <span class="cfg-key-var mono" id="setup-key-var" title="变量名按当前 agent 的品牌自动决定（不用手填）">DEEPSEEK_API_KEY</span>
+          <input type="password" id="setup-key-value" placeholder="sk-…（可留空，稍后在设置里填）" autocomplete="off">
+          <button id="setup-key-save">保存</button>
+        </div>
+      </div>
+    </div>
+    <div class="wp-foot">
+      <span class="muted" id="setup-note">首次设置只做一次；可随时在设置里重跑。</span>
+      <button id="setup-next">下一步</button>
+      <button id="setup-done" hidden>完成</button>
+      <button id="setup-skip">跳过</button>
+    </div>
+  </div>
+</div>
+
 <div id="ask" class="ask" hidden>
   <div class="ask-box">
     <div class="ask-head">
@@ -375,7 +543,7 @@
 <div id="drop-veil" class="drop-veil" hidden>
   <div class="veil-box">松手即可添加附件<br><span>图片支持粘贴（Ctrl+V）或拖入</span></div>
 </div>
-<script src="/app.js?v=260926zd"></script>
+<script src="/app.js?v=260926zp"></script>
 <script>
 /* app.js 没跑起来时（例如加载正好撞上服务重启 / 404）自动重试几次，别卡在「脚本没加载成功」。
    最多 3 次，避免真坏了时无限刷新；加载成功后 app.js 会清掉这个计数。 */

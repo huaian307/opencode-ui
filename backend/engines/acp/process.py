@@ -122,6 +122,12 @@ class AcpProcess:
         env = dict(os.environ)
         if self.env:
             env.update({str(k): str(v) for k, v in self.env.items()})
+        # ⚠ ACP 规定消息是 **UTF-8** 的 JSONL（读侧就是 utf-8 解码）。但 Windows 上
+        #   Python 写的 agent（dsh 之类、以及我们自己的假 agent）在 stdout 是管道时
+        #   会用**系统 ANSI 代码页**（本机 GBK）→ 中文全变 U+FFFD 乱码。
+        #   这两个变量让「Python 写的 agent」也强制 UTF-8；Node 系 agent 不受影响。
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         _inject_git_path(env)          # 自动把本机 Git 的 bin 补进 PATH（bash 要用）
         _inject_pwsh_path(env)         # 自动把 pwsh 补进 PATH（Codex 优先用它，UTF-8 不乱码）
         self._proc = subprocess.Popen(

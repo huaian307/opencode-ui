@@ -230,7 +230,15 @@ function renderSessions() {
   const q = $("search").value.trim().toLowerCase();
   const items = state.sessions.filter((s) => !q || (s.title || "").toLowerCase().includes(q));
   if (!items.length) {
-    $("session-list").innerHTML = `<div class="muted" style="padding:10px">没有匹配的会话</div>`;
+    // ACP 引擎：面板里的会话只是「我们自己的索引」，agent 那边可能还有一堆
+    // （典型：用 opencode-acp 接进 OpenCode，它本地早就有的会话不会自动出现在这里）
+    const hint = ENGINE.active === "acp"
+      ? `<div class="muted" style="padding:10px">没有匹配的会话</div>
+         <div style="padding:0 10px 10px"><button type="button" id="empty-import">从 agent 导入会话…</button></div>`
+      : `<div class="muted" style="padding:10px">没有匹配的会话</div>`;
+    $("session-list").innerHTML = hint;
+    const b = $("empty-import");
+    if (b) b.addEventListener("click", openImport);
     return;
   }
   $("session-list").innerHTML = items.map((s) => {
@@ -405,7 +413,7 @@ function renderMessage(m) {
 
   return `<div class="msg ${isUser ? "user" : "assistant"}${m.pending ? " pending" : ""}">
     <div class="who">
-      ${isUser ? "" : `<img class="avatar" src="/assets/avatar.png" alt="">`}
+      ${isUser ? "" : `<img class="avatar" src="${appearanceUrl("avatar", "/assets/avatar.png")}" alt="">`}
       <strong>${isUser ? "我" : "助手"}</strong>
       ${agent ? `<span class="badge">${esc(agent)}</span>` : ""}
       ${modelID ? `<span class="badge">${esc(modelID)}</span>` : ""}
@@ -491,16 +499,82 @@ function liveContextSnippet(max = 320) {
   return stripModelWarning(String(out || "")).slice(-max).trim();
 }
 
-const HERO_HTML = `<div class="empty">
-    <img class="hero-card" src="/assets/hero.jpg" alt="絵梨衣">
-    <div class="duck-line1">这个会话还是一张白纸。</div>
-    <div class="duck-line2">Sakura ＆ 絵梨衣 のDuck</div>
+/** 某张自定义素材的 URL（没设就走 fallback 的自带素材）。
+ *  `t` 用后端给的版本号破缓存 —— 刚换完图就能看到新的。 */
+function appearanceUrl(key, fallback) {
+  if (!(APPE.images || {})[key]) return fallback;
+  return `/appearance/img?k=${encodeURIComponent(key)}&t=${APPE.version || 0}`;
+}
+
+/** 左上角头像（对话里那个头像在 renderMessage 里，会跟消息重建一起换） */
+function applyAppearance() {
+  const img = document.querySelector(".avatar-brand");
+  if (img) img.src = appearanceUrl("brand", "/assets/badge.jpg");
+}
+
+/** 空会话首屏（主图 / 贴纸 / 三行文案都能改，见设置弹窗） */
+function heroHtml() {
+  const l1 = String(SET.heroL1 || "").trim() || HERO_DEFAULT.l1;
+  const l2 = String(SET.heroL2 || "").trim() || HERO_DEFAULT.l2;
+  const credit = String(SET.heroCredit || "").trim() || HERO_DEFAULT.credit;
+  return `<div class="empty">
+    <img class="hero-card" src="${appearanceUrl("hero", "/assets/hero.jpg")}" alt="絵梨衣">
+    <div class="duck-line1">${esc(l1)}</div>
+    <div class="duck-line2">${esc(l2)}</div>
     <div class="stickers">
-      <img src="/assets/sticker-duck.jpg" alt="">
-      <img src="/assets/sticker-couple.jpg" alt="">
+      <img src="${appearanceUrl("sticker1", "/assets/sticker-duck.jpg")}" alt="">
+      <img src="${appearanceUrl("sticker2", "/assets/sticker-couple.jpg")}" alt="">
     </div>
-    <div class="credit">同人图 · 仅本地自用，版权归原作者所有</div>
+    <div class="credit">${esc(credit)}</div>
   </div>`;
+}
+
+/** 素材或首屏文案变了 → 重画首屏 + 重建消息区（对话头像顺带换掉） */
+function refreshAppearanceArt() {
+  applyAppearance();
+  staticSig = null;
+  heroShown = false;
+  try { renderMessages(); } catch { /* 页面还没初始化完 */ }
+}
+
+/** 拉一次自定义素材清单（接口没有/失败 → 继续用自带素材，不报错） */
+async function loadAppearance() {
+  try {
+    const r = await api("/appearance");
+    APPE.images = (r && r.data) || {};
+    APPE.version = (r && r.version) || 0;
+  } catch { /* 老后端：保持默认素材 */ }
+  return APPE;
+}
+
+/** 点「选择…」：弹原生选图框 → 设为某个位置（key 见 index.html 的 data-img） */
+async function pickAppearanceImage(key) {
+  try {
+    const r = await api("/pick/image", { method: "POST" });
+    if (!r || !r.ok) {
+      if (r && r.canceled) return;
+      setBanner("选择图片失败：" + ((r && r.error) || "未知错误"));
+      return;
+    }
+    await setAppearanceImage(key, r.path);
+  } catch (err) {
+    setBanner("选择图片失败：" + (err && err.message ? err.message : err));
+  }
+}
+
+/** `path` 为空串 = 恢复自带素材 */
+async function setAppearanceImage(key, path) {
+  try {
+    const r = await api("/appearance", { method: "POST", body: JSON.stringify({ key, path }) });
+    APPE.images = (r && r.data) || {};
+    APPE.version = (r && r.version) || 0;
+    refreshAppearanceArt();
+    renderSettings();
+    setBanner(path ? "已换上新图（想还原点「默认」）" : "已恢复自带素材");
+  } catch (err) {
+    setBanner("保存失败：" + (err && err.message ? err.message : err));
+  }
+}
 
 let staticSig = null;
 let staticHtml = "";
@@ -528,7 +602,7 @@ function renderMessages() {
     heroShown = false;
     swapHtml($("msg-static"), staticHtml);
   }
-  if (empty && !heroShown) { swapHtml($("msg-static"), HERO_HTML); heroShown = true; }
+  if (empty && !heroShown) { swapHtml($("msg-static"), heroHtml()); heroShown = true; }
   else if (!empty && heroShown) { swapHtml($("msg-static"), staticHtml); heroShown = false; }
 
   paintLiveSlot();
@@ -628,6 +702,8 @@ async function openSession(id) {
   // 会话名下面不再显示 session id / 本地路径（详情请用侧栏会话项的 ▸ 展开）
   $("session-meta").textContent = "";
   updateModelBtn();                                  // 顶栏模型按钮跟着当前会话走
+  renderModeButton();                                // 顶栏模式按钮跟着当前会话走
+  loadModes();                                       // ACP 的模式清单挂在会话上，所以拿到会话后再拉一次
   $("input").disabled = false;
   $("btn-send").disabled = false;
   $("btn-stop").disabled = false;
@@ -785,6 +861,7 @@ async function newSession() {
     if (created && created.id) {
       await openSession(created.id);
       await ensureSessionModel(created.id);           // ★ 双保险：确保新会话已绑定模型
+      await ensureSessionMode(created.id);            // ★ 同理：应用"新会话默认模式"
     }
   } catch (err) {
     alert("新建会话失败：" + err.message);
@@ -1393,7 +1470,7 @@ const MUSIC = {
   on: false, qqRunning: false, real: false, folded: false, panel: null, panelError: "", lyrWanted: false,
   seekDragging: false, cur: 0, dur: 0,
   state: {}, lyrics: [], lyrKey: "", lyIdx: -1,
-  posAt: 0, vol: 100, volDragging: false, volTimer: null,
+  posAt: 0, posStale: false, vol: 100, volDragging: false, volTimer: null,
 };
 
 /** QQ音乐 的 SMTC 状态不一定报 Playing（实测见过 Opened / Paused），
@@ -1412,12 +1489,18 @@ const musicPlaying = () => {
   return MUSIC.on && s !== "Paused" && s !== "Stopped" && s !== "Closed";
 };
 
-/** 播放位置：面板内用 <audio>.currentTime；QQ SMTC 用服务端位置 + 两次轮询之间本地补时 */
+/** 播放位置：面板内用 <audio>.currentTime；QQ SMTC 用服务端位置 + 两次轮询之间本地补时。
+ *
+ * ⚠ 补时要从 `_music.json` 的采样时间 `ts` 起算，而不是从"收到响应的时刻"起算：
+ * SMTC 采集每 500ms 才更新一次，按响应时刻算会把位置整体估快最多 0.5s，歌词会提前。
+ * 数据 stale（采集进程挂了）时不再补时，避免误差一路滚大。 */
 function musicPos() {
   const a = $("mus-audio");
   if (MUSIC.panel && a) return a.currentTime || 0;
   const base = Number((MUSIC.state || {}).pos || 0);
-  return base + (musicPlaying() ? (Date.now() - MUSIC.posAt) / 1000 : 0);
+  if (!musicPlaying() || MUSIC.posStale) return base;
+  const elapsed = (Date.now() - (MUSIC.posAt || Date.now())) / 1000;
+  return base + Math.max(0, Math.min(elapsed, 3));
 }
 
 function renderPlayer() {
@@ -1538,7 +1621,9 @@ async function pollMusic() {
     MUSIC.state = r.music || {};
     MUSIC.qqRunning = !!r.qqRunning;
     MUSIC.real = !!r.spectrum;                           // 真频谱采样是否可用
-    MUSIC.posAt = Date.now();
+    MUSIC.posStale = !!r.stale;
+    // SMTC 的 pos 是采样时刻 ts 的值；补时从 ts 起算，歌词才对得准
+    MUSIC.posAt = Number((MUSIC.state || {}).ts) || Date.now();
     if (typeof r.volume === "number" && r.volume >= 0 && !MUSIC.volDragging) {
       MUSIC.vol = r.volume;
       $("p-vol").value = String(r.volume);
@@ -2126,8 +2211,20 @@ const SET_DEFAULT = {
   dimHiru: 100, dimYoru: 80, blur: 18, rate: 80,
   live: true, taskbar: true, spectrumSides: true, spectrumSidesH: 100, spectrumSidesGain: 120,
   petals: true, zh: true,
+  // 空会话首屏那几行文案（留空 = 用自带的）
+  heroL1: "", heroL2: "", heroCredit: "",
 };
 const SET = Object.assign({}, SET_DEFAULT);
+
+/** 自定义素材（头像 / 空会话主图与贴纸）—— 路径存在后端 `runtime/state/_appearance.json`，
+ *  图片本身经 `/appearance/img?k=…` 代理出来（面板页是 http 的，直接引用 file:// 会被浏览器拦）。
+ *  ⚠ 必须在 applySettings 之前声明：applySettings 里会调 applyAppearance()。 */
+const APPE = { images: {}, version: 0 };
+const HERO_DEFAULT = {
+  l1: "这个会话还是一张白纸。",
+  l2: "Sakura ＆ 絵梨衣 のDuck",
+  credit: "同人图 · 仅本地自用，版权归原作者所有",
+};
 
 function loadSettings() {
   try { Object.assign(SET, JSON.parse(localStorage.getItem(SET_KEY) || "{}")); } catch { /* 隐私模式 */ }
@@ -2170,6 +2267,7 @@ function applySettings() {
   });
   if (liveApply) liveApply();
   if (typeof drawSpectrum === "function") drawSpectrum();    // 开关后立刻画一次两侧音频条
+  applyAppearance();                                         // 左上角头像（可能被用户换过）
   syncTaskbarPref();                                         // 通知守护进程：任务栏是否隐藏
 }
 
@@ -2179,11 +2277,24 @@ function setSetting(key, value) {
   saveSettings();
   applySettings();
   renderSettings();
+  if (String(key).startsWith("hero")) refreshAppearanceArt();   // 空会话文案：立刻能预览
 }
 
 /* ---------------- 对话引擎（后端 /engine）---------------- */
 
-const ENGINE = { active: "", available: [] };
+const ENGINE = { active: "", available: [], engines: [] };
+
+/** 引擎下拉的选项文案：不可用的标出来（`/engine/status.engines` 给的自述） */
+function engineOptionsHtml(ids) {
+  const byId = {};
+  (ENGINE.engines || []).forEach((e) => { byId[e.id] = e; });
+  return (ids || []).map((id) => {
+    const d = byId[id] || {};
+    const ok = d.available !== false;          // 老后端没有 engines 字段 → 视为可用
+    const label = `${d.label || id}${ok ? "" : "（未就绪）"}`;
+    return `<option value="${esc(id)}"${ok ? "" : " disabled"}>${esc(label)}</option>`;
+  }).join("");
+}
 
 /** 拉取可用引擎并填充设置里的下拉；老后端没这些接口就优雅降级（禁用 + 说明） */
 async function loadEngineStatus() {
@@ -2194,16 +2305,27 @@ async function loadEngineStatus() {
     const st = await api("/engine/status");
     ENGINE.available = (st && st.available) || [];
     ENGINE.active = (st && st.active) || "";
-    sel.innerHTML = ENGINE.available.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
+    ENGINE.engines = (st && st.engines) || [];
+    sel.innerHTML = engineOptionsHtml(ENGINE.available);
     sel.value = ENGINE.active;
     sel.disabled = ENGINE.available.length < 2;
+    // 模式清单跟着引擎走（opencode 是 agent；acp 是审批模式，且要等会话）
+    loadModes();
+    // 「导入…」只有 ACP 引擎才有（opencode 引擎的会话列表本来就是它自己的全部会话）
+    const impBtn = $("btn-import");
+    if (impBtn) impBtn.hidden = ENGINE.active !== "acp";
     if (note) {
-      note.textContent = ENGINE.available.length
-        ? `当前：${ENGINE.active}${ENGINE.available.length < 2 ? "（仅此一个可选）" : ""}`
+      const cur = ENGINE.engines.find((e) => e.id === ENGINE.active) || {};
+      const parts = [];
+      if (cur.available === false) parts.push("当前引擎未就绪");
+      if (ENGINE.available.length < 2) parts.push("仅此一个可选");
+      const hint = ENGINE.available.length
+        ? `当前：${cur.label || ENGINE.active}${parts.length ? "（" + parts.join("；") + "）" : ""}`
         : "后端没有注册任何引擎";
+      note.textContent = hint;
     }
   } catch {
-    ENGINE.available = []; ENGINE.active = "";
+    ENGINE.available = []; ENGINE.active = ""; ENGINE.engines = [];
     sel.innerHTML = "<option>不可用</option>";
     sel.disabled = true;
     if (note) note.textContent = "当前面板服务不支持引擎切换（重启后端后可用）";
@@ -2250,6 +2372,455 @@ async function setEngine(id) {
   await loadEngineStatus();
 }
 
+/* ---------------- 模型 API Key（写进 ACP 共享基线；后端只回掩码）---------------- */
+
+/** provider → 常用环境变量名（填 Key 时自动带出来） */
+const KEY_NAME_BY_PROVIDER = {
+  deepseek: "DEEPSEEK_API_KEY", openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY",
+  google: "GEMINI_API_KEY", xai: "XAI_API_KEY", moonshotai: "MOONSHOT_API_KEY",
+  zhipuai: "ZHIPUAI_API_KEY", alibaba: "DASHSCOPE_API_KEY", mistral: "MISTRAL_API_KEY",
+  groq: "GROQ_API_KEY",
+};
+
+/** 当前 ACP agent 大概是哪家 → 猜一个环境变量名 */
+function guessKeyName() {
+  const a = (ACP.list || []).find((x) => x.id === ACP.active) || {};
+  const prov = String(a.provider || a.providerGuess || "").toLowerCase();
+  return KEY_NAME_BY_PROVIDER[prov] || "DEEPSEEK_API_KEY";
+}
+
+/** 拉基线里的 Key（只拿掩码）并回填到某一行：where = "cfg" | "setup"
+ *  ⚠ 变量名**不让手填**（用户反馈"怎么有两个输入框"）：按当前 agent 的品牌自动决定，
+ *    界面只显示一个只读小标签 + 一个密码框。 */
+async function loadApiKeyRow(where) {
+  const p = where === "setup" ? "setup" : "cfg";
+  const varEl = $(p + "-key-var"), noteEl = $(p + "-key-note");
+  if (!varEl && !noteEl) return;
+  try {
+    const r = await api("/engine/acp/baseline");
+    const d = (r && r.data) || {};
+    const names = d.envNames || [];
+    const shown = names.map((n) => n + " = " + ((d.env || {})[n] || "")).join("　");
+    if (noteEl) {
+      noteEl.textContent = names.length
+        ? `已设置：${shown}（改完点保存；值留空 = 清除）`
+        : "写进共享基线的环境变量；只存本机 runtime/state，不进安装包";
+    }
+    if (varEl) varEl.textContent = names[0] || guessKeyName();
+  } catch {
+    if (noteEl) noteEl.textContent = "拿不到基线（后端需支持 /engine/acp/baseline）";
+    if (varEl && !varEl.textContent) varEl.textContent = "DEEPSEEK_API_KEY";
+  }
+}
+
+/** 保存/清除 Key：name + value（value 为空 = 删除该变量）。
+ *  name 取小标签里那个（按品牌自动决定，见 loadApiKeyRow）。 */
+async function saveApiKey(where) {
+  const p = where === "setup" ? "setup" : "cfg";
+  const name = String((($(p + "-key-var") || {}).textContent) || "").trim() || guessKeyName();
+  const value = String($(p + "-key-value").value || "").trim();
+  const noteEl = $(p + "-key-note");
+  try {
+    const r = await api("/engine/acp/baseline", { method: "POST",
+      body: JSON.stringify({ name, value }) });
+    const d = (r && r.data) || {};
+    $(p + "-key-value").value = "";
+    const names = d.envNames || [];
+    const shown = names.map((n) => n + " = " + ((d.env || {})[n] || "")).join("　");
+    if (noteEl) {
+      noteEl.textContent = (value ? `已保存 ${name}。` : `已清除 ${name}。`)
+        + (names.length ? `当前：${shown}` : "当前没有设置任何 Key");
+    }
+    setBanner(value ? `已保存模型 Key：${name}（改完会重启 ACP 子进程）` : `已清除模型 Key：${name}`);
+    return true;
+  } catch (err) {
+    if (noteEl) noteEl.textContent = "保存失败：" + (err && err.message ? err.message : err);
+    return false;
+  }
+}
+
+/* ---------------- 智能体 / 模式切换（/api/agent + POST /api/session/{id}/agent）----------------
+ * 两个引擎的语义都用同一个接口：
+ *   opencode → OpenCode 的 agent（build / plan / general / explore…）
+ *   acp      → ACP 的审批模式（read-only / agent / auto…，我们后端映射成同形状）
+ * ⚠ 列表里 `hidden: true` 的是内部 agent（compaction / title / summary），**必须过滤**，
+ *   否则弹窗里会混进一堆看不懂的东西（实测 OpenCode 返回 7 条、其中 3 条是 hidden）。
+ * 模式是「会话属性」：没选会话时存成"新会话默认"，建完会话再补一次 POST 应用。 */
+
+const MODE = { list: [], active: "", err: "" };
+const MODE_KEY = "opencode-ui.agent";
+
+function modeDefault() {
+  try { return localStorage.getItem(MODE_KEY) || ""; } catch { return ""; }
+}
+
+/** 当前该显示哪个模式：优先"这个会话自己的"（会话对象上有 agent），再看 /api/agent 的 current */
+function modeCurrent() {
+  if (state.current && state.current.agent) return String(state.current.agent);
+  return MODE.active || "";
+}
+
+function modeName(id) {
+  const a = MODE.list.find((x) => x.id === id);
+  return a ? (a.name || a.id) : (id || "");
+}
+
+async function loadModes() {
+  try {
+    const r = await api("/api/agent");
+    MODE.list = (unwrap(r) || []).filter((a) => a && a.id && !a.hidden);   // ★ 过滤内部 agent
+    MODE.active = ((MODE.list.find((a) => a.current) || {}).id) || "";
+    MODE.err = "";
+  } catch (e) {
+    MODE.list = []; MODE.active = "";
+    MODE.err = (e && e.message) ? e.message : String(e);
+  }
+  renderModeButton();
+  renderModes();
+}
+
+function renderModeButton() {
+  const b = $("btn-agent");
+  if (!b) return;
+  const cur = modeCurrent();
+  const local = modeDefault();
+  if (state.current) {
+    b.textContent = cur || "模式";
+    b.title = cur ? `当前模式：${modeName(cur)}（点开切换）` : "选择智能体 / 模式";
+  } else {
+    b.textContent = local || "模式";
+    b.title = local ? `新会话默认模式：${modeName(local)}（点开修改）` : "选择智能体 / 模式（没选会话时 = 新会话默认）";
+  }
+  b.disabled = MODE.list.length === 0;
+}
+
+function openModes() {
+  $("mode").hidden = false;
+  renderModes();
+  loadModes();
+}
+
+function closeModes() { const b = $("mode"); if (b) b.hidden = true; }
+
+function renderModes() {
+  const box = $("mode-list");
+  if (!box) return;
+  const cur = modeCurrent();
+  const local = modeDefault();
+  const curEl = $("mode-cur");
+  if (!MODE.list.length) {
+    if (curEl) {
+      curEl.textContent = MODE.err
+        ? `拿不到模式清单：${MODE.err}`
+        : "当前 agent / 引擎没有可切换的模式（或还没有会话）";
+    }
+    box.innerHTML = `<div class="muted" style="padding:10px">`
+      + `ACP 的模式清单来自会话（先建一条会话或选一条已有的），OpenCode 的模式来自 /api/agent。</div>`;
+    return;
+  }
+  if (curEl) {
+    curEl.textContent = state.current
+      ? `当前会话的模式：${cur ? modeName(cur) : "（未知）"}`
+      : `没选会话 → 这里的点击会记成「新会话默认」${local ? "（现在：" + modeName(local) + "）" : ""}`;
+  }
+  box.innerHTML = MODE.list.map((a) => {
+    const on = a.id === cur && state.current;
+    const isLocal = a.id === local;
+    return `<div class="agents-row${on ? " on" : ""}" data-mode="${esc(a.id)}">`
+      + `<div class="an"><span class="dot ok"></span>${esc(a.name || a.id)}`
+      + `<span class="muted" style="font-size:11px">${esc(a.id)}</span>`
+      + `<span class="muted" style="font-size:11px;margin-left:auto">`
+      + `${on ? "当前" : (isLocal ? "新会话默认 · 点一下用于本会话" : "点一下切换")}</span></div>`
+      + (a.description ? `<div class="ab">${esc(a.description)}</div>` : "")
+      + `</div>`;
+  }).join("");
+}
+
+async function pickMode(id) {
+  if (!id) return;
+  if (!state.current) {                       // 没选会话 → 记成新会话默认
+    try { localStorage.setItem(MODE_KEY, id); } catch { /* 隐私模式 */ }
+    setBanner(`已设为新会话默认模式：${modeName(id)}`);
+    closeModes();
+    renderModeButton();
+    return;
+  }
+  const curEl = $("mode-cur");
+  try {
+    await api(`/api/session/${state.current.id}/agent`, {
+      method: "POST", body: JSON.stringify({ agent: id }) });
+    MODE.active = id;
+    state.current.agent = id;
+    setBanner(`已切换模式：${modeName(id)}`);
+    closeModes();
+    renderModeButton();
+    loadSessions();                            // 列表/详情里的 agent 也跟着变
+  } catch (e) {
+    if (curEl) curEl.textContent = "切换失败：" + (e && e.message ? e.message : e);
+    setBanner("切换模式失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+/** 新建会话后：把"新会话默认模式"补一次（create 的 body 目前不吃 agent，和模型同款双保险） */
+async function ensureSessionMode(sid) {
+  const want = modeDefault();
+  if (!want || !sid) return;
+  try {
+    if (!MODE.list.length) await loadModes();
+    if (!MODE.list.some((x) => x.id === want)) return;   // 不同引擎的模式名不一样，不认识就不发
+    if (MODE.active === want) return;
+    await api(`/api/session/${sid}/agent`, { method: "POST",
+      body: JSON.stringify({ agent: want }) });
+    MODE.active = want;
+    if (state.current && state.current.id === sid) {
+      state.current.agent = want;
+      renderModeButton();
+    }
+  } catch { /* 设不上就算了，不拦着用 */ }
+}
+
+/* ---------------- 从 agent 导入会话（ACP 的 session/list）----------------
+ * 背景：ACP 引擎的面板会话列表 = **我们自己的索引**（`_acp_sessions.json`），
+ * 所以用 `opencode-acp` 接进 OpenCode 时，OpenCode 那边**早就有的会话看不到**
+ * （反过来在 ACP 里新建的会话会写进 OpenCode 的库，所以"本地看的到"）。
+ * 这里把 agent 侧的会话列出来，点一下就领进面板（历史留在 agent 那边，接着聊即可）。 */
+
+const IMP = { list: [], cursor: null, supported: null, err: "" };
+
+async function openImport() {
+  const box = $("import");
+  if (!box) return;
+  box.hidden = false;
+  $("imp-cur").textContent = "读取中…";
+  $("imp-list").innerHTML = "";
+  await loadImport();
+}
+
+function closeImport() { const b = $("import"); if (b) b.hidden = true; }
+
+async function loadImport() {
+  try {
+    const r = await api("/api/session/remote");
+    IMP.supported = !!(r && r.supported);
+    IMP.list = (r && r.sessions) || [];
+    IMP.cursor = (r && r.cursor) || null;
+    IMP.err = (r && r.error) || "";
+  } catch (e) {
+    IMP.supported = false;
+    IMP.list = [];
+    IMP.err = (e && e.message) ? e.message : String(e);
+  }
+  renderImport();
+}
+
+function renderImport() {
+  const box = $("imp-list");
+  const cur = $("imp-cur");
+  if (!box) return;
+  if (IMP.supported === false) {
+    if (cur) cur.textContent = IMP.err || "当前 agent / 引擎不支持列会话（session/list）";
+    box.innerHTML = `<div class="muted" style="padding:10px">`
+      + `只有 ACP 引擎 + 支持 <code>session/list</code> 的 agent 才能列出来。`
+      + `（OpenCode 自带的 ACP 支持；Codex 也支持）</div>`;
+    return;
+  }
+  const n = IMP.list.length;
+  const fresh = IMP.list.filter((x) => !x.imported).length;
+  if (cur) cur.textContent = n
+    ? `agent 侧共 ${n} 条${fresh ? `，其中 ${fresh} 条还没导入` : "（都已在面板里）"}`
+    : "agent 侧没有会话";
+  if (!n) {
+    box.innerHTML = `<div class="muted" style="padding:10px">agent 那边也没有历史会话。</div>`;
+    return;
+  }
+  box.innerHTML = IMP.list.map((s) => {
+    const title = s.title || "(无标题)";
+    const when = s.updatedAt ? String(s.updatedAt).replace("T", " ").slice(0, 16) : "";
+    return `<div class="agents-row${s.imported ? " on" : ""}" data-imp="${esc(s.id)}">`
+      + `<div class="an"><span class="dot ok"></span>${esc(title)}`
+      + `<span class="muted" style="font-size:11px">${esc(s.id)}</span>`
+      + `<span class="muted" style="font-size:11px;margin-left:auto">`
+      + `${s.imported ? "已导入 · 点开" : "点一下导入"}</span></div>`
+      + `<div class="ab">${esc(s.cwd || "")}${when ? "　·　" + esc(when) : ""}</div>`
+      + `</div>`;
+  }).join("");
+}
+
+/** 点一条：没导入就 POST /api/session/import，然后打开它 */
+async function doImport(remoteId) {
+  const s = IMP.list.find((x) => x.id === remoteId);
+  if (!s) return;
+  if (s.imported && s.localID) { closeImport(); await openSession(s.localID); return; }
+  const cur = $("imp-cur");
+  if (cur) cur.textContent = "导入中…";
+  try {
+    const r = await api("/api/session/import", { method: "POST",
+      body: JSON.stringify({ id: s.id, title: s.title || "" }) });
+    const local = (r && r.data) || {};
+    setBanner(`已导入会话：${local.title || s.id}（历史留在 agent 那边，可直接接着聊）`);
+    closeImport();
+    await loadSessions();
+    if (local.id) await openSession(local.id);
+  } catch (e) {
+    if (cur) cur.textContent = "导入失败：" + (e && e.message ? e.message : e);
+  }
+}
+
+/* ---------------- 首次设置向导（默认引擎 / agent / 模型）---------------- */
+
+const SETUP_KEY = "opencode-ui.setup.v1";
+const SETUP = { open: false, engine: "", models: [] };
+
+/** 首次启动 / 手动重跑：选默认引擎与 agent，并把模型清单拉出来 */
+async function openSetup() {
+  const box = $("setup");
+  if (!box || SETUP.open) return;
+  SETUP.open = true;
+  SETUP.models = [];
+  box.hidden = false;
+  $("setup-model-row").hidden = true;
+  $("setup-agent-row").hidden = true;
+  $("setup-done").hidden = true;
+  $("setup-next").hidden = false;
+  $("setup-next").disabled = false;
+  $("setup-note").textContent = "首次设置只做一次；可随时在设置里重跑。";
+  let st = null;
+  try { st = await api("/engine/status"); } catch { st = null; }
+  const avail = (st && st.available) || ["opencode", "acp"];
+  ENGINE.engines = (st && st.engines) || [];
+  ENGINE.available = avail;
+  ENGINE.active = (st && st.active) || "";
+  $("setup-engine").innerHTML = engineOptionsHtml(avail);
+  const cur = ENGINE.active;
+  if (cur && avail.includes(cur)) $("setup-engine").value = cur;
+  // ⚠ 中性化：当前引擎不可用时，自动落到第一个「真的能用」的引擎，并把话说清楚
+  const byId = {};
+  ENGINE.engines.forEach((e) => { byId[e.id] = e; });
+  if (cur && byId[cur] && byId[cur].available === false) {
+    const ok = ENGINE.engines.find((e) => e.available !== false);
+    if (ok) $("setup-engine").value = ok.id;
+    $("setup-cur").textContent = `当前引擎「${byId[cur].label || cur}」未就绪`
+      + `${byId[cur].error ? "：" + byId[cur].error : ""}`
+      + (ok ? `；已先帮你选到可用的「${ok.label || ok.id}」。` : "；下面没有可用的引擎，可先「跳过」。");
+  } else {
+    $("setup-cur").textContent = "选一个引擎；以后可在设置里重跑这个向导。";
+  }
+  await setupEngineChanged();
+}
+
+/** 引擎变化：ACP 才需要选 agent（和填模型 Key） */
+async function setupEngineChanged() {
+  const engine = $("setup-engine").value;
+  SETUP.engine = engine;
+  const row = $("setup-agent-row");
+  const keyRow = $("setup-key-row");
+  if (engine !== "acp") {
+    row.hidden = true;
+    if (keyRow) keyRow.hidden = true;
+    return;
+  }
+  row.hidden = false;
+  if (keyRow) keyRow.hidden = false;
+  const sel = $("setup-agent");
+  sel.innerHTML = `<option value="">加载中…</option>`;
+  try {
+    await loadAcpAgents();
+    await loadApiKeyRow("setup");       // Key 的变量名按当前 agent 的 provider 猜
+    const list = (ACP.list || []).filter((a) => a.available);
+    if (!list.length) {
+      sel.innerHTML = `<option value="">没有可用 agent</option>`;
+      $("setup-note").textContent = "没有检测到可用的 ACP agent；可以跳过，之后到设置 → ACP 代理里添加。";
+      return;
+    }
+    sel.innerHTML = list.map((a) =>
+      `<option value="${esc(a.id)}">${esc(a.label || a.id)}</option>`).join("");
+  } catch {
+    sel.innerHTML = `<option value="">拿不到 agent 列表</option>`;
+  }
+}
+
+/** 下一步：应用引擎 / agent，并尝试把模型清单取回来 */
+async function setupNext() {
+  const engine = $("setup-engine").value;
+  const btn = $("setup-next");
+  btn.disabled = true;
+  $("setup-note").textContent = "正在应用…";
+  try {
+    if (ENGINE.active !== engine) await setEngine(engine);
+    if (engine === "acp") {
+      const aid = $("setup-agent").value;
+      if (aid && aid !== ACP.active) {
+        const r = await api("/engine/acp/agents", { method: "POST", body: JSON.stringify({ id: aid }) });
+        ACP.active = (r && r.active) || aid;
+        ACP.list = (r && r.agents) || ACP.list;
+        if (typeof updateAcpRow === "function") updateAcpRow();
+      }
+    }
+    let list = [];
+    try { list = unwrap(await api("/api/model")) || []; } catch { list = []; }
+    if (!list.length && engine === "acp") {
+      // ACP 的模型清单挂在会话上：一条都没有就先建一条，把 agent 拉起来
+      try {
+        const existing = unwrap(await api("/api/session?limit=1")) || [];
+        if (!existing.length) await api("/api/session", { method: "POST", body: "{}" });
+        list = unwrap(await api("/api/model")) || [];
+      } catch { list = []; }
+    }
+    SETUP.models = list;
+    $("setup-model-row").hidden = false;
+    const msel = $("setup-model");
+    if (list.length) {
+      msel.innerHTML = list.map((m) =>
+        `<option value="${esc(m.id)}">${esc(m.name || m.id)}</option>`).join("");
+      $("setup-note").textContent = "选好默认模型后点「完成」。";
+    } else {
+      msel.innerHTML = `<option value="">（暂时拿不到模型清单）</option>`;
+      $("setup-note").textContent = "没拿到模型清单，也可以先完成；之后打开模型弹窗会再拉。";
+    }
+    $("setup-next").hidden = true;
+    $("setup-done").hidden = false;
+  } catch (err) {
+    $("setup-note").textContent = "应用失败：" + (err && err.message ? err.message : err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** 完成：记住默认模型 + 可选保存 Key + 标记已设置，然后刷新 */
+async function setupDone() {
+  const mid = $("setup-model").value;
+  if (mid) {
+    const m = (SETUP.models || []).find((x) => String(x.id) === String(mid)) || {};
+    saveDefaultModel({ id: mid, providerID: m.providerID || "", variant: "default" });
+  }
+  // 向导里填了 Key 就顺手保存（留空则不动现有的）
+  try {
+    const kv = String(($("setup-key-value") || {}).value || "").trim();
+    if (kv) await saveApiKey("setup");
+  } catch { /* 存不上也不拦着走完向导 */ }
+  setupMarkDone();
+  closeSetup();
+  setBanner(`首次设置完成：引擎 ${SETUP.engine || $("setup-engine").value}${mid ? " · 模型 " + mid : ""}`);
+  try { reloading = true; } catch { /* 旧版没有这个变量 */ }
+  setTimeout(() => { try { location.reload(); } catch { /* ignore */ } }, 400);
+}
+
+/** 跳过 / 关闭：也标记完成，别每次启动都弹 */
+function setupSkip() {
+  setupMarkDone();
+  closeSetup();
+}
+
+function setupMarkDone() {
+  try { localStorage.setItem(SETUP_KEY, "1"); } catch { /* 隐私模式 */ }
+}
+
+function closeSetup() {
+  const box = $("setup");
+  if (box) box.hidden = true;
+  SETUP.open = false;
+}
+
 /* ---------------- ACP agentlist（/engine/acp/agents）---------------- */
 
 const ACP = { active: "", list: [] };
@@ -2274,8 +2845,8 @@ function updateAcpRow() {
   if (btn) btn.textContent = a ? a.label : "选择 agent…";   // 按钮直接显示"当前用的是哪个"
   if (!note) return;
   note.textContent = a
-    ? `当前使用：${a.label}${a.available ? "" : "（缺：" + ((a.missing || []).join("、") || "依赖") + "）"} · 点右侧更换或新增`
-    : "选择要驱动的 agent（Codex / dsh / …）";
+    ? `当前使用：${a.label}${a.provider ? " · provider " + a.provider : ""}${a.available ? "" : "（缺：" + ((a.missing || []).join("、") || "依赖") + "）"} · 点右侧更换或新增`
+    : "选择要驱动的 ACP agent";
 }
 
 function renderAgents() {
@@ -2289,10 +2860,15 @@ function renderAgents() {
   }
   box.innerHTML = ACP.list.map((a) => {
     const canDel = !a.builtin && a.id !== ACP.active;
+    const prov = a.provider || "";
+    const guess = !prov && a.providerGuess ? a.providerGuess : "";
     return `<div class="agents-row${a.id === ACP.active ? " on" : ""}" data-aid="${esc(a.id)}"`
       + ` title="${esc((a.command || []).join(" ") + (a.cwd ? "\n" + a.cwd : ""))}">`
       + `<div class="an"><span class="dot${a.available ? " ok" : ""}"></span>${esc(a.label)}`
       + `<span class="muted" style="font-size:11px">${esc(a.id)}</span>`
+      + (prov ? `<span class="badge">${esc(prov)}</span>` : "")
+      // provider 没配时给个"猜的"提示（点「编辑当前 agent…」可一键填入）
+      + (guess ? `<span class="muted" style="font-size:11px" title="推断出的 provider，点「编辑当前 agent…」可填入">≈${esc(guess)}</span>` : "")
       + `<span class="muted" style="font-size:11px;margin-left:auto">`
       + `${a.available ? "可用" : esc("缺：" + ((a.missing || []).join("、") || "依赖"))}</span>`
       + (canDel ? `<button type="button" class="p-x" data-del="${esc(a.id)}" title="删除这个 agent">×</button>` : "")
@@ -2300,6 +2876,19 @@ function renderAgents() {
       + (a.note ? `<div class="ab">${esc(a.note)}</div>` : "")
       + `</div>`;
   }).join("");
+  // 每张卡片右上角补一个「改」（编辑名称/命令/目录/provider）
+  box.querySelectorAll(".agents-row[data-aid] .an").forEach((an) => {
+    const aid = an.parentElement.dataset.aid;
+    if (!aid || an.querySelector("[data-edit]")) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "p-x";
+    b.dataset.edit = aid;
+    b.title = "编辑这个 agent（名称 / 命令 / 目录 / provider）";
+    b.textContent = "改";
+    const del = an.querySelector("[data-del]");
+    if (del) an.insertBefore(b, del); else an.appendChild(b);
+  });
 }
 
 /* ---------------- 新增 ACP agent：先列「发现的新 agent」，再退到「选文件夹」 ---------------- */
@@ -2339,6 +2928,7 @@ function renderCandidates() {
     + ` title="${esc((c.command || []).join(" ") + (c.dir ? "\n" + c.dir : ""))}">`
     + `<div class="an"><span class="dot${c.available ? " ok" : ""}"></span>${esc(c.label)}`
     + `<span class="muted" style="font-size:11px">${esc(c.id)}</span>`
+    + (c.provider ? `<span class="badge">${esc(c.provider)}</span>` : "")
     + `<span class="muted" style="font-size:11px;margin-left:auto">`
     + `${c.available ? "可直接用" : esc("缺：" + ((c.missing || []).join("、") || "依赖"))}</span></div>`
     + (c.note ? `<div class="ab">${esc(c.note)}</div>` : "")
@@ -2355,7 +2945,9 @@ async function addCandidate(cid) {
     ANEW.list = ANEW.list.filter((x) => x.id !== cid);
     ACP.list = (r && r.agents) || ACP.list;
     ACP.active = (r && r.active) || ACP.active;
-    setBanner(`已添加 agent：${c.label}（回上一页点卡片即可切换）`);
+    const added = ACP.list.find((x) => x.id === c.id) || {};
+    setBanner(`已添加 agent：${c.label}${added.provider ? "（provider: " + added.provider + "）" : ""}`
+      + `（回上一页点卡片即可切换）`);
     renderCandidates();
     renderAgents();
     updateAcpRow();
@@ -2376,7 +2968,8 @@ async function addFromFolder() {
       body: JSON.stringify({ action: "add-folder", dir: p.path, activate: false }) });
     ACP.list = (r && r.agents) || ACP.list;
     ACP.active = (r && r.active) || ACP.active;
-    setBanner(`已从文件夹添加：${r.added}${r.note ? "（" + r.note + "）" : ""}`);
+    setBanner(`已从文件夹添加：${r.added}${r.provider ? "（provider: " + r.provider + "）" : ""}`
+      + `${r.note ? "（" + r.note + "）" : ""}`);
     closeAgentsNew();
     renderAgents();
     updateAcpRow();
@@ -2477,22 +3070,79 @@ async function pickAgent(id) {
   }
 }
 
-async function editAgentCommand() {
-  if (!ACP.active) return;
-  const a = ACP.list.find((x) => x.id === ACP.active);
-  const cur = (a && a.command) ? a.command.join(" ") : "";
-  const v = prompt("编辑当前 agent 的命令（空格分隔；含空格的路径请用英文双引号包住）：", cur);
-  if (v === null) return;
-  const parts = (v.match(/"[^"]*"|\S+/g) || []).map((s) => s.replace(/^"|"$/g, ""));
-  if (!parts.length) { setBanner("命令为空，未修改"); return; }
+/* ---------------- 编辑 agent（名称 / 命令 / 目录 / provider / 说明）---------------- */
+
+const AE = { id: "" };
+
+/** 打开编辑弹窗；`id` 不给就编辑「当前使用中」的那个 */
+function editAgentCommand(id) {
+  const aid = id || ACP.active;
+  if (!aid) { setBanner("还没有选中的 agent"); return; }
+  const a = ACP.list.find((x) => x.id === aid);
+  if (!a) { setBanner("找不到 agent：" + aid); return; }
+  AE.id = aid;
+  $("ae-title").textContent = `编辑 Agent · ${aid}`;
+  $("ae-label").value = a.label || "";
+  $("ae-command").value = (a.command || []).join(" ");
+  $("ae-cwd").value = a.cwd || "";
+  $("ae-provider").value = a.provider || "";
+  $("ae-note").value = a.note || "";
+  $("ae-msg").textContent = a.provider || !(a.providerGuess)
+    ? "改命令 / provider 会重启这个 agent 的子进程"
+    : `推断出的 provider 是「${a.providerGuess}」（点「自动」填入）`;
+  $("agent-edit").hidden = false;
+}
+
+function closeAgentEdit() { $("agent-edit").hidden = true; AE.id = ""; }
+
+/** 「自动」：让后端按命令 / env / CODEX_HOME 猜 provider（只填输入框，不保存） */
+async function guessAgentProvider() {
+  const btn = $("ae-guess");
+  if (btn) btn.disabled = true;
   try {
-    const r = await api("/engine/acp/agents", { method: "POST", body: JSON.stringify({ id: ACP.active, command: parts }) });
+    const r = await api("/engine/acp/agents", { method: "POST",
+      body: JSON.stringify({ action: "guess-provider", id: AE.id,
+                             command: parseCmd($("ae-command").value) }) });
+    const p = (r && r.provider) || "";
+    if (p) {
+      $("ae-provider").value = p;
+      $("ae-msg").textContent = `已推断 provider：${p}（保存后生效）`;
+    } else {
+      $("ae-msg").textContent = "推断不出 provider；留空也行（模型用字母徽章，分组显示 acp）";
+    }
+  } catch (err) {
+    $("ae-msg").textContent = "推断失败：" + (err && err.message ? err.message : err);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** 命令字符串 → 数组（空格分隔；含空格的路径用英文双引号） */
+function parseCmd(v) {
+  return (String(v || "").match(/"[^"]*"|\S+/g) || []).map((s) => s.replace(/^"|"$/g, ""));
+}
+
+async function saveAgentEdit() {
+  if (!AE.id) return;
+  const cmd = parseCmd($("ae-command").value);
+  if (!cmd.length) { $("ae-msg").textContent = "命令不能为空"; return; }
+  const btn = $("ae-save");
+  if (btn) btn.disabled = true;
+  try {
+    const body = { id: AE.id, label: $("ae-label").value.trim(), command: cmd,
+                   cwd: $("ae-cwd").value.trim(), provider: $("ae-provider").value.trim(),
+                   note: $("ae-note").value.trim(), activate: false };
+    const r = await api("/engine/acp/agents", { method: "POST", body: JSON.stringify(body) });
     ACP.list = (r && r.agents) || ACP.list;
-    setBanner("已更新命令：" + parts.join(" "));
+    ACP.active = (r && r.active) || ACP.active;
+    setBanner(`已保存 agent：${AE.id}${body.provider ? " · provider " + body.provider : ""}`);
+    closeAgentEdit();
     updateAcpRow();
     renderAgents();
   } catch (err) {
-    setBanner("更新命令失败：" + err.message);
+    $("ae-msg").textContent = "保存失败：" + (err && err.message ? err.message : err);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -2507,6 +3157,17 @@ function renderSettings() {
   if (bn) bn.value = $("brand-name").textContent || BRAND_DEFAULT;
   const bs = $("cfg-brand-sub");
   if (bs) bs.value = ($("brand-sub") ? $("brand-sub").textContent : "") || BRAND_SUB_DEFAULT;
+  [["cfg-hero-l1", SET.heroL1], ["cfg-hero-l2", SET.heroL2],
+   ["cfg-hero-credit", SET.heroCredit]].forEach(([id, v]) => {
+    const el = $(id);
+    if (el) el.value = String(v || "");
+  });
+  // 自定义素材那一排：显示当前用的是哪个文件（只显示文件名，路径放 tooltip）
+  document.querySelectorAll("[data-img-name]").forEach((el) => {
+    const p = String((APPE.images || {})[el.dataset.imgName] || "");
+    el.textContent = p ? (p.split(/[\\/]/).pop() || "已设置") : "默认";
+    el.title = p || "默认（自带素材）";
+  });
   put("cfg-dim-hiru", SET.dimHiru, SET.dimHiru + "%");
   put("cfg-dim-yoru", SET.dimYoru, SET.dimYoru + "%");
   put("cfg-blur", SET.blur, SET.blur + "px");
@@ -2528,6 +3189,8 @@ function initSettings() {
     $("cfg").hidden = false;
     renderSettings();
     musicStatus();
+    musicComponent();                       // 音乐服务是可选项：没装就明说
+    loadApiKeyRow("cfg");                   // 模型 API Key（只显示掩码）
     loadWallpaperRoot();                    // 目录可能被外部改过，每次打开都刷新
     loadEngineStatus();                     // 可用引擎 / 当前引擎（老后端会优雅降级）
   };
@@ -2538,13 +3201,33 @@ function initSettings() {
 
   $("cfg-brand").addEventListener("input", (e) => applyBrandName(e.target.value));
   $("cfg-brand-sub").addEventListener("input", (e) => applyBrandSub(e.target.value));
+  $("cfg-hero-l1").addEventListener("input", (e) => setSetting("heroL1", e.target.value));
+  $("cfg-hero-l2").addEventListener("input", (e) => setSetting("heroL2", e.target.value));
+  $("cfg-hero-credit").addEventListener("input", (e) => setSetting("heroCredit", e.target.value));
+  // 自定义素材那一排：选择… / 默认（事件委托，按钮是静态的但用 data-img 更省代码）
+  $("cfg").addEventListener("click", (e) => {
+    const pick = e.target.closest(".cfg-img-pick");
+    if (pick) { pickAppearanceImage(pick.dataset.img); return; }
+    const clr = e.target.closest(".cfg-img-clear");
+    if (clr) { setAppearanceImage(clr.dataset.img, ""); }
+  });
   $("cfg-engine").addEventListener("change", (e) => setEngine(e.target.value));
   $("cfg-acp-btn").addEventListener("click", openAgents);
+  $("cfg-setup").addEventListener("click", () => { close(); openSetup(); });
+  $("setup-engine").addEventListener("change", setupEngineChanged);
+  $("setup-next").addEventListener("click", setupNext);
+  $("setup-done").addEventListener("click", setupDone);
+  $("setup-skip").addEventListener("click", setupSkip);
+  $("setup-close").addEventListener("click", setupSkip);
+  $("setup").addEventListener("click", (e) => { if (e.target === $("setup")) setupSkip(); });
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("setup").hidden) setupSkip(); });
   $("agents-close").addEventListener("click", closeAgents);
   $("agents").addEventListener("click", (e) => { if (e.target === $("agents")) closeAgents(); });
   $("agents-list").addEventListener("click", (e) => {
     const del = e.target.closest("[data-del]");
     if (del) { e.stopPropagation(); delAgent(del.dataset.del); return; }
+    const ed = e.target.closest("[data-edit]");
+    if (ed) { e.stopPropagation(); editAgentCommand(ed.dataset.edit); return; }
     const row = e.target.closest(".agents-row[data-aid]");
     if (row) pickAgent(row.dataset.aid);
   });
@@ -2560,8 +3243,39 @@ function initSettings() {
   $("agents-reload").addEventListener("click", loadAcpAgents);
   $("agents-detect").addEventListener("click", detectAgents);
   $("agents-edit").addEventListener("click", editAgentCommand);
+  $("btn-agent").addEventListener("click", openModes);
+  $("mode-close").addEventListener("click", closeModes);
+  $("mode").addEventListener("click", (e) => { if (e.target === $("mode")) closeModes(); });
+  $("mode-list").addEventListener("click", (e) => {
+    const row = e.target.closest("[data-mode]");
+    if (row) pickMode(row.dataset.mode);
+  });
+  $("mode-default").addEventListener("click", () => {
+    try { localStorage.removeItem(MODE_KEY); } catch { /* 隐私模式 */ }
+    setBanner("已清除「新会话默认模式」（跟随引擎默认）");
+    renderModeButton();
+    renderModes();
+  });
+  $("btn-import").addEventListener("click", openImport);
+  $("imp-close").addEventListener("click", closeImport);
+  $("imp-reload").addEventListener("click", loadImport);
+  $("import").addEventListener("click", (e) => { if (e.target === $("import")) closeImport(); });
+  $("imp-list").addEventListener("click", (e) => {
+    const row = e.target.closest("[data-imp]");
+    if (row) doImport(row.dataset.imp);
+  });
+  $("cfg-key-save").addEventListener("click", () => saveApiKey("cfg"));
+  $("setup-key-save").addEventListener("click", () => saveApiKey("setup"));
+  $("ae-close").addEventListener("click", closeAgentEdit);
+  $("ae-cancel").addEventListener("click", closeAgentEdit);
+  $("ae-save").addEventListener("click", saveAgentEdit);
+  $("ae-guess").addEventListener("click", guessAgentProvider);
+  $("agent-edit").addEventListener("click", (e) => { if (e.target === $("agent-edit")) closeAgentEdit(); });
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    if (!$("mode").hidden) { closeModes(); return; }
+    if (!$("import").hidden) { closeImport(); return; }
+    if (!$("agent-edit").hidden) { closeAgentEdit(); return; }
     if (!$("agents-new").hidden) { closeAgentsNew(); return; }
     if (!$("agents").hidden) closeAgents();
   });
@@ -2913,7 +3627,8 @@ function initWallpaperPicker() {
 
 /* ---------------- 面板内搜歌/放歌（网易云 · 非官方接口，走 /music/* 代理）---------------- */
 
-const MUS = { list: [], playing: null, provider: "netease", loop: "all", shuffle: false, bag: [], queueName: "", playlists: [], recommend: [], playlistId: "", homeOpen: false, homeView: "recommend", homeSig: "", playlistsErr: "", recommendErr: "", view: "", seq: 0 };
+const MUS = { list: [], playing: null, provider: "netease", loop: "all", shuffle: false, bag: [], queueName: "", playlists: [], recommend: [], playlistId: "", homeOpen: false, homeView: "recommend", homeSig: "", playlistsErr: "", recommendErr: "", view: "", seq: 0,
+  installed: null, audioBar: null };   // installed: 音乐服务（可选组件）装没装
 const MUS_KEY = "opencode-ui.music";
 const MUS_SAVE_EVERY = 2000;                  // 播放中每隔 2s 落一次盘，刷新后能接着放
 
@@ -3218,6 +3933,10 @@ function musTime(s) {
 async function musicSearch(qRaw) {
   const q = String(qRaw || "").trim();
   if (!q) return;
+  if (MUS.installed === false) {          // 可选组件没装：直说，别去撞 502
+    setBanner("音乐服务未安装（安装包里的可选组件；勾上「音乐服务」重装即可）");
+    return;
+  }
   const box = $("p-results");
   if (MUS.homeOpen) { const s = $("mus-songs"); if (s) s.innerHTML = `<div class="mus-empty">搜索中…</div>`; }
   else if (box) { box.hidden = false; box.innerHTML = '<div class="hint">搜索中…</div>'; }
@@ -3407,6 +4126,28 @@ async function restoreMusicState() {
   });
 }
 
+/** 音乐服务（可选组件）装没装 —— 没装就明说，别让人以为面板坏了。
+ *  安装包里「音乐服务」是可选组件，不勾就不会有 runtime/venvs/music 或 site-packages/music。 */
+async function musicComponent() {
+  try {
+    const c = await api("/music/component");
+    MUS.installed = !!(c && c.installed);
+    MUS.audioBar = !!(c && c.audio);
+    if (!MUS.installed) {
+      const why = ((c && c.music && c.music.reason) || "未安装音乐服务");
+      const box = $("p-results");
+      if (box) {
+        box.innerHTML = `<div class="muted" style="padding:10px">${esc(why)}`
+          + `（安装包里的可选组件；勾上「音乐服务」重装即可）</div>`;
+        box.classList.add("on");
+      }
+      const q = $("p-q");
+      if (q) { q.disabled = true; q.placeholder = "音乐服务未安装"; }
+      setBanner(why + " —— 面板里的搜索/播放需要这个可选组件");
+    }
+  } catch { MUS.installed = null; }
+}
+
 async function musicStatus() {
   try {
     const r = await api("/music/status");
@@ -3414,7 +4155,7 @@ async function musicStatus() {
     const put = (id, st) => { const b = $(id); if (b) b.textContent = (st && st.loggedIn) ? "已登录 · 重贴" : "贴 Cookie"; };
     put("cfg-ck-netease", p.netease);
     put("cfg-ck-qq", p.qq);
-  } catch { /* 服务没起来就保持原样 */ }
+  } catch { /* 服务没起来（多半是没装这个可选组件）→ musicComponent() 已经解释过了 */ }
 }
 
 /** 音频事件：播放 / 暂停 / 结束 都刷新播放条与歌词；并负责落盘进度 */
@@ -3448,6 +4189,7 @@ const MODEL_KEY = "opencode-ui.model";
    muse-spark / big-pickle 没有公开品牌标 → 走字母徽章。 */
 const MODEL_ICONS = {
   "deepseek": "deepseek", "deepseek-flash": "deepseek", "deepseek-thinking": "deepseek",
+  "anthropic": "anthropic", "claude": "anthropic",
   "mimo": "xiaomi", "ling": "antgroup", "nemotron": "nvidia", "nemotron-free": "nvidia",
 };
 const MODEL_ICON_DIR = "/assets/models/";
@@ -3461,8 +4203,10 @@ function modelFull(ref) {
 
 function iconKeyFor(ref) {
   if (!ref) return "";
+  const id = String(ref.id || "");
+  const prefix = id.includes("/") ? id.split("/")[0] : "";   // `deepseek/xxx` → `deepseek`
   const fam = String(ref.family || "");
-  const tries = [ref.id, fam, fam.replace(/-free$/, ""), ref.providerID];
+  const tries = [id, prefix, fam, fam.replace(/-free$/, ""), ref.providerID];
   for (const k of tries) if (k && MODEL_ICONS[k]) return MODEL_ICONS[k];
   return "";
 }
@@ -3547,7 +4291,7 @@ function currentModel() {
 const sameModel = (a, b) => !!a && !!b && a.id === b.id && a.providerID === b.providerID;
 
 function modelText(ref, withVariant) {
-  if (!ref) return "（跟随 OpenCode 默认）";
+  if (!ref) return "（跟随引擎默认）";
   const base = `${ref.providerID}/${ref.id}`;
   return (withVariant && ref.variant && ref.variant !== "default") ? `${base} · ${ref.variant}` : base;
 }
@@ -3580,7 +4324,7 @@ function renderModels() {
     .some((x) => String(x || "").toLowerCase().includes(q)));
   $("mdl-cur").textContent = state.current
     ? "当前会话：" + modelText(state.current.model, true)
-    : (cur ? "未选会话 · 新会话默认：" + modelText(cur, true) : "未选会话 · 跟随 OpenCode 默认");
+    : (cur ? "未选会话 · 新会话默认：" + modelText(cur, true) : "未选会话 · 跟随引擎默认");
   if (!items.length) {
     box.innerHTML = `<div class="muted" style="padding:10px">`
       + (all.length ? "没有匹配的模型" : "拿不到模型清单") + `</div>`;
@@ -3591,9 +4335,10 @@ function renderModels() {
   box.innerHTML = Object.keys(byProv).sort().map((prov) => {
     const rows = byProv[prov].map((m) => {
       const on = sameModel(cur, m);
-      const c = (m.cost && m.cost[0]) || {};
-      const paid = (c.input || 0) > 0 || (c.output || 0) > 0;
-      const meta = [m.id, paid ? `付费 in ${c.input}/out ${c.output}` : "免费",
+      const c = (m.cost && m.cost[0]) || null;
+      const paid = c ? ((c.input || 0) > 0 || (c.output || 0) > 0) : null;
+      const fee = c ? (paid ? `付费 in ${c.input}/out ${c.output}` : "免费") : "费用未知";
+      const meta = [m.id, fee,
         (m.capabilities && m.capabilities.tools) ? "工具" : ""].filter(Boolean).join(" · ");
       const vars = (m.variants || []).map((v) => {
         const von = on && (cur.variant || "default") === v.id;
@@ -3743,15 +4488,20 @@ $("messages").addEventListener("scroll", () => {
   initMusicAudio();
   restoreMusicState();                   // 刷新后面板内歌曲信息 / 队列 / 进度恢复
   initSettings();
+  // 自定义素材（头像 / 空会话主图与贴纸）：拉回来后再画一次首屏（接口没有就安静跳过）
+  loadAppearance().then(() => refreshAppearanceArt());
   initModelPicker();
   initAsk();
   pollAsks();
   loadModels().then(updateModelBtn);      // 预取模型清单：顶栏按钮才能立刻显示官方图标
+  loadModes();                            // 预取模式清单（opencode 的 build/plan…；ACP 的要等会话）
   startHeartbeat();
   setBanner("正在连接引擎…");
   renderMessages();      // ⚠ 必须先渲染一次：没有会话时也要把消息区换成空态，否则会一直留着 index.html 的兜底横幅
   connectionLoop();
   setInterval(loadSessions, 20000);
+  // 首次启动：要求选默认引擎 / agent / 模型（跳过或完成后不再自动弹）
+  try { if (localStorage.getItem(SETUP_KEY) !== "1") setTimeout(openSetup, 350); } catch { /* 隐私模式 */ }
 })();
 
 /* 标记：app.js 已成功执行。index.html 里的兜底脚本靠它判断要不要自动重试。 */

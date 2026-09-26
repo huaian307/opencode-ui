@@ -35,11 +35,19 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs, quote
 
+# ⚠ 必须**在**本地 import 之前把自己所在目录塞进 sys.path：
+#   嵌入式 Python（安装包自带的那种）有 `._pth` → 进入"隔离模式"，
+#   **不会**像普通 python 那样把脚本目录加进 sys.path，于是 `import cleanup` 直接
+#   ModuleNotFoundError（实测踩到）。这一行让两种装法都一样能跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import cleanup
 import engines
 from engines.base import HOP_BY_HOP
 from engines.acp import agents as acp_agents
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 FRONTEND_DIR = os.path.join(ROOT, "frontend")
 TOOLS_DIR = os.path.join(ROOT, "tools")
@@ -74,15 +82,58 @@ BEAT_TIMEOUT = 8.0          # 心跳断档多久算"页面没了"（正常 4 秒
 
 MUSIC_FILE = os.path.join(STATE_DIR, "_music.json")
 SPECTRUM_FILE = os.path.join(STATE_DIR, "_spectrum.json")
-AUDIO_PY = os.path.join(VENVS_DIR, "audio", "Scripts", "python.exe")
+
+
+SITE_PACKAGES_DIR = os.path.join(RUNTIME_DIR, "site-packages")
+
+
+def _component_python(name: str):
+    """可选组件（音乐服务 / 音频频谱）该怎么启动 → `(解释器路径|None, 额外 PYTHONPATH)`。
+
+    支持两种装法：
+      ① **老式 venv**：`runtime/venvs/<name>/Scripts/pythonw.exe`（本机现状）
+      ② **安装包形态**：面板自带的解释器 + `runtime/site-packages/<name>`。
+         ⚠ venv **不能随包**：`pyvenv.cfg` 与 Scripts 里的转发壳写着构建机的绝对路径，
+         换台机器就废。所以安装包只放"纯 site-packages"，用 `sys.executable` + PYTHONPATH 跑。
+    返回 `(None, "")` 表示**这个组件没装** —— 调用方一律安静跳过（前端会提示"可选组件未安装"）。
+    """
+    base = os.path.join(VENVS_DIR, name, "Scripts")
+    pw = os.path.join(base, "pythonw.exe")
+    if os.path.isfile(pw):
+        return pw, ""          # ① venv 的 pythonw：GUI 子系统，从根上不闪黑框
+    pe = os.path.join(base, "python.exe")
+    if os.path.isfile(pe):
+        return pe, ""
+    extra = os.path.join(SITE_PACKAGES_DIR, name)
+    if os.path.isdir(extra):
+        return sys.executable, extra   # ② 自带解释器 + 可选 site-packages
+    return None, ""
+
+
+def _component_env(extra_site: str) -> dict:
+    """给可选组件的子进程准备 env（把可选 site-packages 挂进 PYTHONPATH）。
+
+    ⚠ 嵌入式 Python 有 `._pth` 时会**忽略 PYTHONPATH** —— 安装包那边靠 `init_state.fix_pth()`
+      把组件目录写进 `._pth` 才真正生效；这里设上是为了"用普通 python 跑"的场景也没问题。
+    """
+    env = dict(os.environ)
+    if extra_site:
+        cur = env.get("PYTHONPATH") or ""
+        env["PYTHONPATH"] = extra_site + (os.pathsep + cur if cur else "")
+    return env
+
+
+AUDIO_PY, AUDIO_SITE = _component_python("audio")
 _spectrum_proc = None
 _spectrum_lock = threading.Lock()
 MUSIC = {"state": {}, "updated": 0.0}
 _music_proc = None
 _music_lock = threading.Lock()
 
-# 网易云音乐服务（跑在隔离环境 runtime/venvs/music；非官方接口，仅供个人自用）
-MUSIC_SVC_PY = os.path.join(VENVS_DIR, "music", "Scripts", "python.exe")
+# 网易云音乐服务（非官方接口，仅供个人自用）。**可选组件**：
+# 装它是 runtime/venvs/music（开发机）或 runtime/site-packages/music（安装包）；
+# 没装就完全跳过，面板里的音乐 UI 会显示"未安装音乐服务（可选组件）"。
+MUSIC_SVC_PY, MUSIC_SVC_SITE = _component_python("music")
 MUSIC_SVC_PORT = 8790
 _musicsvc_proc = None
 _musicsvc_lock = threading.Lock()
@@ -220,9 +271,16 @@ def _qq_get_json(url: str, referer: str = "https://y.qq.com/") -> dict:
 
 
 def _lrc_parse(raw: str) -> list:
-    """把 LRC 解析成 [{t: 秒, s: 文本}]，按时间升序。"""
+    """把 LRC 解析成 [{t: 秒, s: 文本}]，按时间升序。
+
+    ⚠ 要处理 `[offset:±毫秒]`：官方 LRC（包括 QQ 的部分文件）会用它整体平移时间轴，
+    忽略它会让所有歌词提前/延后。offset 可能出现在任意位置，所以先扫一遍。
+    """
+    raw = raw or ""
+    m_off = re.search(r"\[offset:([+-]?\d+)\]", raw)
+    offset = int(m_off.group(1)) / 1000.0 if m_off else 0.0
     out = []
-    for line in (raw or "").splitlines():
+    for line in raw.splitlines():
         m = re.match(r"^((?:\[\d+:\d+(?:[.:]\d+)?\])+)(.*)$", line.strip())
         if not m:
             continue
@@ -230,7 +288,8 @@ def _lrc_parse(raw: str) -> list:
         if not text:
             continue
         for mm, ss in re.findall(r"\[(\d+):(\d+(?:[.:]\d+)?)\]", m.group(1)):
-            out.append({"t": round(int(mm) * 60 + float(ss.replace(":", ".")), 2), "s": text})
+            t = int(mm) * 60 + float(ss.replace(":", ".")) + offset
+            out.append({"t": round(max(0.0, t), 2), "s": text})
     out.sort(key=lambda x: x["t"])
     return out
 
@@ -548,11 +607,15 @@ def start_music_daemon(force: bool = False) -> None:
 
 
 def ui_version() -> str:
-    """读 frontend/index.html 里的 ?v=，作为"服务端现在的前端版本号"。
-    前端拿它和自己加载到的 ?v= 比对，不一致就自动刷新（避免面板一直跑旧代码）。"""
+    """读 frontend/index.html 里 **app.js** 的 `?v=`，作为"服务端现在的前端版本号"。
+    前端拿它和自己加载到的 ?v= 比对，不一致就自动刷新（避免面板一直跑旧代码）。
+
+    ⚠ 一定要**锚定 app.js**：文件里第一个 `?v=` 是 `style.css` 的（两处版本号各管各的缓存），
+      用 `re.search(r"\\?v=")` 会取到 CSS 版本 —— app.js 改了却报"没变"，面板就不会刷新。
+    """
     try:
         with open(os.path.join(FRONTEND_DIR, "index.html"), "r", encoding="utf-8") as fh:
-            m = re.search(r"\?v=([\w.\-]+)", fh.read())
+            m = re.search(r"/app\.js\?v=([\w.\-]+)", fh.read())
         return m.group(1) if m else ""
     except Exception:  # noqa: BLE001
         return ""
@@ -630,6 +693,76 @@ def write_wallpaper_root_override(path: str) -> tuple:
     except Exception as exc:  # noqa: BLE001
         return False, f"保存失败：{exc}"
     return True, path
+
+
+# ============================ 自定义外观（头像 / 空会话素材 / 文案）============================
+# 能换的东西：左上角头像、对话里助手头像、空会话的主图与两张贴纸。
+# 图片的做法：只记**本机文件路径**（runtime/state/_appearance.json），再由 `/appearance/img`
+#   代理出去 —— 面板页是 http://127.0.0.1，直接引用 file:// 会被浏览器拦（混合内容）。
+# 文案（空会话那几行）放前端 localStorage，跟「左上角名字」一致。
+# ⚠ `key` 是固定枚举：界面上的 data-img 值必须在这里，写别的会被 400 顶回来。
+APPEARANCE_FILE = os.path.join(STATE_DIR, "_appearance.json")
+APPEARANCE_KEYS = ("brand", "avatar", "hero", "sticker1", "sticker2")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif")
+IMAGE_MAX_BYTES = 32 * 1024 * 1024
+
+
+def read_appearance() -> dict:
+    """当前自定义素材：`{key: 绝对路径}`（没设的键不出现）。"""
+    try:
+        with open(APPEARANCE_FILE, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    if isinstance(d, dict):
+        for k in APPEARANCE_KEYS:
+            v = str(d.get(k) or "").strip()
+            if v:
+                out[k] = v
+    return out
+
+
+def appearance_version() -> int:
+    """给前端破缓存的版本号（文件 mtime；没有就是 0）。"""
+    try:
+        return int(os.path.getmtime(APPEARANCE_FILE))
+    except OSError:
+        return 0
+
+
+def write_appearance_image(key: str, path: str) -> tuple:
+    """设置/清除一张自定义图（`path` 为空 = 恢复默认）。返回 `(ok, message)`。"""
+    key = str(key or "").strip()
+    if key not in APPEARANCE_KEYS:
+        return False, "未知的图片位置：%s（可选：%s）" % (key or "(空)", "/".join(APPEARANCE_KEYS))
+    cur = read_appearance()
+    path = str(path or "").strip()
+    if not path:
+        cur.pop(key, None)
+        msg = "已恢复默认"
+    else:
+        p = os.path.normpath(os.path.expandvars(os.path.expanduser(path)))
+        if not os.path.isfile(p):
+            return False, "文件不存在：%s" % p
+        if os.path.splitext(p)[1].lower() not in IMAGE_EXTS:
+            return False, "不是支持的图片格式（png / jpg / webp / gif / bmp / avif）"
+        try:
+            if os.path.getsize(p) > IMAGE_MAX_BYTES:
+                return False, "图片太大（上限 32 MB）"
+        except OSError as exc:
+            return False, "读不到文件：%s" % exc
+        cur[key] = p
+        msg = p
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = APPEARANCE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(cur, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, APPEARANCE_FILE)
+    except Exception as exc:  # noqa: BLE001
+        return False, "保存失败：%s" % exc
+    return True, msg
 
 
 def auto_we_root():
@@ -833,9 +966,13 @@ def spectrum_age():
 
 
 def start_spectrum(force: bool = False) -> None:
-    """拉起频谱采集进程（用 runtime/venvs/audio 里的 python；没有那个环境就安静跳过）。"""
+    """拉起频谱采集进程（可选组件；**没装就安静跳过**）。
+
+    装法有两种（见 `_component_python`）：`runtime/venvs/audio`（开发机）或
+    `runtime/site-packages/audio`（安装包）。没装时前端自动退回 CSS 合成动画。
+    """
     global _spectrum_proc
-    if not os.path.isfile(AUDIO_PY):
+    if not AUDIO_PY:
         return
     if not force:
         age = spectrum_age()
@@ -851,6 +988,7 @@ def start_spectrum(force: bool = False) -> None:
             _spectrum_proc = subprocess.Popen(
                 [AUDIO_PY, script, "--out", SPECTRUM_FILE],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                env=_component_env(AUDIO_SITE),
                 creationflags=NO_WINDOW)
         except Exception:  # noqa: BLE001
             _spectrum_proc = None
@@ -888,10 +1026,19 @@ def music_svc_alive() -> bool:
         return False
 
 
+def music_component() -> dict:
+    """音乐服务这个**可选组件**的状态（给 /music/status 与前端提示用）。"""
+    return {"installed": bool(MUSIC_SVC_PY),
+            "running": music_svc_alive() if MUSIC_SVC_PY else False,
+            "kind": ("venv" if MUSIC_SVC_PY and os.path.join(VENVS_DIR, "music") in str(MUSIC_SVC_PY)
+                     else ("site-packages" if MUSIC_SVC_SITE else "")),
+            "reason": "" if MUSIC_SVC_PY else "未安装音乐服务（安装包里的可选组件）"}
+
+
 def start_music_service() -> None:
-    """拉起网易云音乐服务（用 runtime/venvs/music；没有那个环境就安静跳过）。"""
+    """拉起本地音乐服务（可选组件；**没装就安静跳过**）。"""
     global _musicsvc_proc
-    if not os.path.isfile(MUSIC_SVC_PY):
+    if not MUSIC_SVC_PY:
         return
     with _musicsvc_lock:
         if _musicsvc_proc is not None and _musicsvc_proc.poll() is None:
@@ -903,9 +1050,20 @@ def start_music_service() -> None:
             _musicsvc_proc = subprocess.Popen(
                 [MUSIC_SVC_PY, script, "--port", str(MUSIC_SVC_PORT)],
                 cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                stdin=subprocess.DEVNULL, env=_component_env(MUSIC_SVC_SITE),
+                creationflags=NO_WINDOW)
         except Exception:  # noqa: BLE001
             _musicsvc_proc = None
+
+
+def stop_music_service() -> None:
+    """停掉面板内搜歌服务（连 venv 转发壳的子进程一起）。"""
+    global _musicsvc_proc
+    with _musicsvc_lock:
+        proc = _musicsvc_proc
+        _musicsvc_proc = None
+    if proc is not None and proc.poll() is None:
+        cleanup.kill_pid(proc.pid)
 
 
 def music_service_keeper() -> None:
@@ -1000,6 +1158,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._engine_status()
             elif path == "/engine":
                 self._engine_switch(method)
+            elif path == "/engine/acp/baseline":
+                # ACP 共享基线：模型 API Key 就写在这里（只存本机 runtime/state）
+                eng = engines.get_engine("acp")
+                if method == "GET":
+                    self._send_json(200, {"ok": True, "data": eng.baseline_view()})
+                    return
+                if method != "POST":
+                    self._send_json(405, {"error": "GET or POST only"})
+                    return
+                b = self._read_json_body() or {}
+                env = b.get("env") if isinstance(b.get("env"), dict) else {}
+                patch = dict(env)
+                if b.get("name") is not None:                # 也允许 {name, value} 单键写法
+                    patch[str(b.get("name") or "")] = str(b.get("value") or "")
+                if not patch:
+                    self._send_json(400, {"ok": False, "error": "没有要写的环境变量（env 或 name/value）"})
+                    return
+                eng.set_baseline_env(patch)
+                self._send_json(200, {"ok": True, "data": eng.baseline_view()})
             elif path == "/engine/acp/agents":
                 self._acp_agents(method)
             elif path == "/qq/state":
@@ -1018,6 +1195,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._qq_app(method)
             elif path == "/live/root/pick":
                 self._live_root_pick(method)
+            elif path == "/pick/image":
+                self._pick_image(method)
+            elif path == "/appearance":
+                self._appearance(method)
+            elif path == "/appearance/img":
+                self._appearance_img()
             elif path == "/live/root":
                 self._live_root(method)
             elif path == "/live/wallpapers":
@@ -1028,6 +1211,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._live_pick(method)
             elif path.startswith("/we/"):
                 self._we(path)
+            elif path == "/music/component":
+                # 音乐服务是**可选组件**：这条不受 /music/* 代理影响，永远 200，
+                # 前端据此显示"未安装"提示而不是让人以为坏了。
+                self._send_json(200, {"ok": True, "audio": bool(AUDIO_PY),
+                                      "music": music_component()})
             elif path.startswith("/music/"):
                 self._music_proxy(method, path)
             elif path.startswith("/api/"):
@@ -1100,6 +1288,8 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True,
             "active": eng.id,
             "available": engines.list_engines(),
+            # 每个引擎的自述（label + 到底能不能用）—— 向导/设置据此标灰不可用的引擎
+            "engines": engines.describe(),
             "detail": eng.status(),
         })
 
@@ -1116,6 +1306,11 @@ class Handler(BaseHTTPRequestHandler):
                                   "available": engines.list_engines()})
             return
         ok = engines.set_active_engine_id(eid)
+        if ok and eid == "acp":
+            try:                                     # 切到 ACP 就预热进程，别等第一次提问
+                threading.Thread(target=engines.get_engine("acp").prewarm, daemon=True).start()
+            except Exception:  # noqa: BLE001
+                pass
         self._send_json(200 if ok else 500, {"ok": ok, "active": engines.active_engine_id()})
 
     def _acp_agents(self, method: str):
@@ -1142,6 +1337,15 @@ class Handler(BaseHTTPRequestHandler):
         if act == "candidates":
             self._send_json(200, {"ok": True, "candidates": acp_agents.scan_candidates()})
             return
+        if act == "guess-provider":
+            # 编辑弹窗的「自动」按钮：只**猜**不写（用户点了保存才落盘）
+            aid = str(b.get("id") or "")
+            a = acp_agents.find_agent(acp_agents.load_registry(), aid) if aid else {}
+            if not a:
+                a = {"command": b.get("command") or [], "env": b.get("env") or {},
+                     "label": b.get("label") or "", "note": b.get("note") or ""}
+            self._send_json(200, {"ok": True, "provider": acp_agents.guess_provider(a)})
+            return
         if act == "add-folder":
             d = str(b.get("dir") or "")
             cmd, note = acp_agents.infer_from_dir(d)
@@ -1150,6 +1354,7 @@ class Handler(BaseHTTPRequestHandler):
                                       "error": "这个文件夹里没找到 ACP agent（既没有 node 适配器，也没有 *acp*.exe）"})
                 return
             label = b.get("label") or os.path.basename(d.rstrip("\\/")) or "agent"
+            # provider 由 add_agent 自动猜（从命令/目录推断）；用户可在 agentlist 里改
             a = eng.add_agent(label, cmd, "", {}, note)
             if not a:
                 self._send_json(400, {"ok": False, "error": "添加失败"})
@@ -1157,6 +1362,7 @@ class Handler(BaseHTTPRequestHandler):
             if b.get("activate", False):
                 eng.select_agent(a["id"])
             self._send_json(200, {"ok": True, "added": a.get("id"), "note": note,
+                                  "provider": a.get("provider") or "",
                                   "active": eng.active_agent_id(),
                                   "detail": eng.status(), "agents": eng.list_agents()})
             return
@@ -1165,7 +1371,8 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(cmd, str):
                 cmd = [x for x in re.split(r"\s+", cmd.strip()) if x]
             a = eng.add_agent(b.get("label") or "", cmd,
-                              b.get("cwd") or "", b.get("env") or {}, b.get("note") or "")
+                              b.get("cwd") or "", b.get("env") or {}, b.get("note") or "",
+                              b.get("provider") or "")
             if not a:
                 self._send_json(400, {"ok": False, "error": "需要 label 与 command"})
                 return
@@ -1186,7 +1393,7 @@ class Handler(BaseHTTPRequestHandler):
         if not aid:
             self._send_json(400, {"ok": False, "error": "缺少 id"})
             return
-        patch = {k: b[k] for k in ("label", "command", "cwd", "env", "note") if k in b}
+        patch = {k: b[k] for k in ("label", "command", "cwd", "env", "note", "provider", "mode") if k in b}
         if patch and not eng.patch_agent(aid, patch):
             self._send_json(404, {"ok": False, "error": "agent 不存在", "id": aid})
             return
@@ -1302,17 +1509,21 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 动态壁纸（创意工坊 mp4）----------
 
-    def _live_root_pick(self, method: str):
-        """弹一个 Windows 原生文件夹选择框；取消返回 {ok:false, canceled:true}。"""
-        if method != "POST":
-            self._send_json(405, {"error": "POST only"})
-            return
-        script = os.path.join(TOOLS_DIR, "pick_folder.ps1")
+    def _pick_path(self, script_name: str, tag: str, what: str):
+        """弹一个 Windows 原生选择框，把结果路径回给前端。
+
+        `what` 只用在报错文案里（「选择文件夹超时」/「选择图片超时」）。
+        取消 → `{ok:false, canceled:true}`；脚本缺失 → 500。
+        ⚠ 读回来的内容要剥掉可能的 BOM（PS5.1 的 `Set-Content -Encoding UTF8` 会写 BOM，
+          路径前面多一个 `\\ufeff` 就打不开了）。
+        """
+        script = os.path.join(TOOLS_DIR, script_name)
         if not os.path.isfile(script):
-            self._send_json(500, {"ok": False, "error": "缺少 tools/pick_folder.ps1"})
+            self._send_json(500, {"ok": False, "error": "缺少 tools/%s" % script_name})
             return
         out = os.path.join(tempfile.gettempdir(),
-                           "opencode-ui-pick-%d-%d.txt" % (os.getpid(), int(time.time() * 1000)))
+                           "opencode-ui-%s-%d-%d.txt" % (tag, os.getpid(), int(time.time() * 1000)))
+        proc = None
         try:
             proc = subprocess.run(
                 ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
@@ -1322,7 +1533,7 @@ class Handler(BaseHTTPRequestHandler):
             path = ""
             try:
                 with open(out, "r", encoding="utf-8", errors="replace") as fh:
-                    path = fh.read().strip()
+                    path = fh.read().strip().lstrip("\ufeff")
             except OSError:
                 path = ""
             if not path:
@@ -1330,9 +1541,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, {"ok": True, "canceled": False, "path": path})
         except subprocess.TimeoutExpired:
-            self._send_json(504, {"ok": False, "error": "选择文件夹超时"})
+            self._send_json(504, {"ok": False, "error": "%s超时" % what})
         except Exception as exc:  # noqa: BLE001
-            detail = (proc.stderr or "")[:300] if "proc" in locals() else ""
+            detail = (proc.stderr or "")[:300] if proc is not None else ""
             self._send_json(500, {"ok": False, "error": f"{type(exc).__name__}: {exc}", "detail": detail})
         finally:
             try:
@@ -1340,6 +1551,45 @@ class Handler(BaseHTTPRequestHandler):
                     os.remove(out)
             except OSError:
                 pass
+
+    def _live_root_pick(self, method: str):
+        """弹一个 Windows 原生文件夹选择框；取消返回 {ok:false, canceled:true}。"""
+        if method != "POST":
+            self._send_json(405, {"error": "POST only"})
+            return
+        self._pick_path("pick_folder.ps1", "pick", "选择文件夹")
+
+    def _pick_image(self, method: str):
+        """弹一个原生「选图片」框（自定义头像 / 空会话素材用）。"""
+        if method != "POST":
+            self._send_json(405, {"error": "POST only"})
+            return
+        self._pick_path("pick_image.ps1", "pickimg", "选择图片")
+
+    def _appearance(self, method: str):
+        """自定义外观（头像 / 空会话素材）：GET 读当前，POST 设置或清除。"""
+        if method == "GET":
+            self._send_json(200, {"ok": True, "data": read_appearance(),
+                                  "keys": list(APPEARANCE_KEYS), "version": appearance_version()})
+            return
+        if method != "POST":
+            self._send_json(405, {"error": "GET or POST only"})
+            return
+        b = self._read_json_body() or {}
+        ok, msg = write_appearance_image(b.get("key"), b.get("path"))
+        self._send_json(200 if ok else 400,
+                        {"ok": ok, "message": msg, "error": "" if ok else msg,
+                         "data": read_appearance(), "version": appearance_version()})
+
+    def _appearance_img(self):
+        """把某个位置的自定义图流出去（没设 / 文件没了 → 404，前端退回自带素材）。"""
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        key = str((q.get("k") or [""])[0])
+        target = read_appearance().get(key)
+        if not target or not os.path.isfile(target):
+            self._send_json(404, {"error": "no custom image", "key": key})
+            return
+        self._send_file(target)
 
     def _live_root(self, method: str):
         """自定义动态壁纸读取目录：空 = 自动查找本机 Wallpaper Engine 创意工坊 431960。"""
@@ -1503,9 +1753,22 @@ class Handler(BaseHTTPRequestHandler):
         engines.active_engine().handle_api(self, method)
 
     def _music_proxy(self, method: str, path: str):
-        """把 /music/* 代理到本地网易云服务（127.0.0.1:MUSIC_SVC_PORT）。"""
+        """把 /music/* 代理到本地音乐服务（127.0.0.1:MUSIC_SVC_PORT）。
+
+        ⚠ 音乐服务是**可选组件**：没装的话这里必须给一句人话，别让用户以为面板坏了。
+        """
+        if not MUSIC_SVC_PY:
+            self._send_json(503, {"ok": False, "installed": False,
+                                  "error": music_component()["reason"],
+                                  "hint": "重跑安装包勾选「音乐服务」组件，或自建 "
+                                          "runtime/venvs/music / runtime/site-packages/music"})
+            return
         if not music_svc_alive():
             start_music_service()
+            for _ in range(10):                     # 刚装完第一次点：给它最多 3 秒起来
+                time.sleep(0.3)
+                if music_svc_alive():
+                    break
         query = urlsplit(self.path).query
         target = "http://127.0.0.1:%d%s" % (MUSIC_SVC_PORT, path[len("/music"):])
         if query:
@@ -1559,8 +1822,17 @@ class Server(ThreadingHTTPServer):
 def main() -> int:
     parser = argparse.ArgumentParser(description="OpenCode 自建界面的本地代理")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8787)
+    try:
+        from panel_port import read_ports as _read_ports
+        _defaults = _read_ports()
+    except Exception:  # noqa: BLE001
+        _defaults = {"port": 8787, "music": 8790}
+    parser.add_argument("--port", type=int, default=int(_defaults.get("port", 8787)))
+    parser.add_argument("--music-port", type=int, default=int(_defaults.get("music", 8790)),
+                        help="本地音乐服务端口（两个副本同时跑时必须错开）")
     args = parser.parse_args()
+    global MUSIC_SVC_PORT
+    MUSIC_SVC_PORT = int(args.music_port)
 
     eng = engines.active_engine()
     url = None
@@ -1568,15 +1840,26 @@ def main() -> int:
     try:
         url, _, version = eng.read_service()
     except FileNotFoundError:
+        # ⚠ 首次启动 / 还没选引擎时不要直接退出：页面照样要在 8787 上打开，
+        # 由前端「首次设置」向导引导选引擎 / agent。缺上游只是代理暂时不可用。
         print(f"[!] 引擎 {eng.id} 未就绪：找不到 {getattr(eng, 'service_state', '')}", file=sys.stderr)
         if eng.id == "opencode":
-            print("    请先启动 OpenCode（桌面版或 `opencode serve`）。", file=sys.stderr)
-        return 1
+            print("    （可先在 http://127.0.0.1:8787 的首次设置里换成 ACP，或启动 OpenCode）",
+                  file=sys.stderr)
     except NotImplementedError:
         pass                       # 该引擎不需要上游地址（例如 ACP 自己拉起 agent 子进程）
     except Exception as exc:  # noqa: BLE001
         print(f"[!] 引擎 {eng.id} 未就绪：{exc}", file=sys.stderr)
-        return 1
+
+    # 自愈：把「子命令式 ACP」（典型：`opencode-cli.exe acp`）补进注册表。
+    # ⚠ 安装那一刻的 init_state 可能正好探测不到（环境变量不全 / 文件数上限 / 链接未就绪），
+    #   漏了的话用户就会觉得"OpenCode 明明在本机、agentlist 里却没有它"——所以每次启动都补一次。
+    try:
+        added = acp_agents.ensure_opencode_agent()
+        if added:
+            print(f"[i] 已自动补上 ACP agent：{added}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] 自动补 ACP agent 失败：{type(exc).__name__}: {exc}", file=sys.stderr)
 
     httpd = None
     try:
@@ -1586,12 +1869,28 @@ def main() -> int:
         print(f"[i] 端口 {args.host}:{args.port} 已在监听，视为已在运行（{exc}）")
         return 0
 
+    # 启动前先清掉上次遗留的辅助进程：它们脱离了父进程，又因 SO_REUSEADDR 能占住
+    # 同一个端口，不主动清就会越积越多。
+    try:
+        _n = cleanup.kill_stale(exclude=[os.getpid()])
+        if _n:
+            print(f"[i] 已清理 {_n} 个遗留辅助进程")
+    except Exception:  # noqa: BLE001
+        pass
+
     start_music_daemon()                      # 拉起 SMTC 采集进程（QQ音乐联动）
     threading.Thread(target=music_keeper, daemon=True).start()
     start_spectrum()                          # 拉起频谱采集进程（真·音频条）
     threading.Thread(target=spectrum_keeper, daemon=True).start()
     start_music_service()                     # 拉起网易云音乐服务（面板内搜歌/放歌）
     threading.Thread(target=music_service_keeper, daemon=True).start()
+
+    # ACP 引擎：启动就预热当前 agent 的子进程（第一次提问不用等 node 冷启动）
+    if eng.id == "acp":
+        try:
+            threading.Thread(target=eng.prewarm, daemon=True).start()
+        except Exception:  # noqa: BLE001
+            pass
 
     print("opencode-ui 已启动")
     print(f"  界面    http://{args.host}:{args.port}")
@@ -1606,6 +1905,15 @@ def main() -> int:
     finally:
         stop_music_daemon()
         stop_spectrum()
+        stop_music_service()
+        try:                                     # 收起所有 ACP agent 子进程
+            engines.get_engine("acp").shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cleanup.kill_stale(exclude=[os.getpid()])
+        except Exception:  # noqa: BLE001
+            pass
         httpd.server_close()
     return 0
 

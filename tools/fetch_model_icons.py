@@ -30,15 +30,18 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 ICONS = {
     "deepseek": "https://models.dev/logos/deepseek.svg",
+    "anthropic": "https://models.dev/logos/anthropic.svg",
     "xiaomi": "https://cdn.simpleicons.org/xiaomi",
     "nvidia": "https://cdn.simpleicons.org/nvidia",
     "antgroup": "https://unpkg.com/@lobehub/icons-static-svg/icons/antgroup-color.svg",
 }
 
 # 有的源 SVG 不带颜色（currentColor / 默认黑），放进 <img> 会渲染成黑色，夜里看不见。
-# 这里按品牌色补上（DeepSeek 蓝 #4D6BFE、蚂蚁蓝 #1677FF；小米/英伟达自带品牌色）。
+# 这里按品牌色补上（DeepSeek 蓝 #4D6BFE、Anthropic 陶土色 #D97757、蚂蚁蓝 #1677FF；
+# 小米/英伟达自带品牌色）。
 BRAND_FILL = {
     "deepseek": "#4D6BFE",
+    "anthropic": "#D97757",
     "antgroup": "#1677FF",
 }
 

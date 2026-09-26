@@ -3,9 +3,11 @@ r"""opencode-ui 守护进程（无窗口运行）
 
 职责：
   1. 确保本地面板服务（server.py）在 127.0.0.1:8787 上活着，挂了就拉起来；
-  2. 检测 OpenCode 桌面版启动 → 打开面板窗口；
+  2. 面板窗口该开就开 —— ⚠ **是否依赖 OpenCode 由当前引擎决定**（见 opencode_required()）：
+       引擎 = opencode → 等 OpenCode 起来再开窗，开完最小化它，关窗联动关掉它；
+       引擎 = acp    → **完全独立**：不看/不等/不碰 OpenCode，关窗也不关任何东西。
   3. 面板窗口用【独立浏览器 profile】打开（完全独立实例，不干扰日常浏览器）；
-  4. 关掉面板窗口 → 一并关掉 OpenCode（可用 --no-kill 或 no-kill 文件关闭此行为）；
+  4. 关掉面板窗口 → 一并关掉 OpenCode（仅 opencode 模式；可用 --no-kill 或 no-kill 文件关闭）；
   5. 面板窗口开 → 任务栏**自动隐藏**（鼠标贴底边才浮现），关 → 恢复**常驻可见**。
      （只有常驻守护负责这件事：--once 自己马上退出，没人能把它恢复回来。）
 
@@ -15,7 +17,7 @@ r"""opencode-ui 守护进程（无窗口运行）
   兜底：如果心跳没有但浏览器确实在跑（例如页面还是旧版、没发心跳），仍然算"开着"。
 
 用法：
-    pythonw watch.py               # 常驻（由 launch.vbs / 启动文件夹调用）
+    pythonw watch.py               # 常驻（由 launch_opencode.py / 启动文件夹调用）
     python  watch.py --once        # 只做一次：确保服务 + 需要就开窗口，然后退出
     python  watch.py --no-kill     # 关窗口时不关 OpenCode
     python  watch.py --restore-taskbar   # 只把任务栏恢复常驻可见，然后退出（stop.bat 兜底）
@@ -38,10 +40,31 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 RUNTIME_DIR = os.path.join(ROOT, "runtime")
 LOGS_DIR = os.path.join(RUNTIME_DIR, "logs")
-HOST, PORT = "127.0.0.1", 8787
+
+
+def _argv_int(flag: str, default: int) -> int:
+    """从命令行取一个整数端口（`--port 17887`）。取不到就用 default。"""
+    try:
+        i = sys.argv.index(flag)
+        return int(sys.argv[i + 1])
+    except Exception:  # noqa: BLE001
+        return default
+
+
+# 端口：命令行 > runtime/state/_panel.json（安装包写的） > 默认 8787/8788/8790
+try:
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    from panel_port import read_ports as _read_ports
+    _PORTS = _read_ports()
+except Exception:  # noqa: BLE001
+    _PORTS = {"port": 8787, "lock": 8788, "music": 8790}
+HOST = "127.0.0.1"
+PORT = _argv_int("--port", int(_PORTS.get("port", 8787)))
+LOCK_PORT = _argv_int("--lock-port", int(_PORTS.get("lock", 8788)))
+MUSIC_PORT = _argv_int("--music-port", int(_PORTS.get("music", 8790)))
 URL = f"http://{HOST}:{PORT}"
 ALIVE_URL = f"{URL}/alive"
-LOCK_PORT = 8788
 os.makedirs(LOGS_DIR, exist_ok=True)
 LOG = os.path.join(LOGS_DIR, "watch.log")
 
@@ -150,7 +173,8 @@ def ensure_server() -> bool:
         return False
     log("面板服务不在，启动 server.py")
     subprocess.Popen(
-        [sys.executable, os.path.join(HERE, "server.py")],
+        [sys.executable, os.path.join(HERE, "server.py"),
+         "--port", str(PORT), "--music-port", str(MUSIC_PORT)],
         cwd=ROOT, creationflags=DETACHED,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
@@ -179,7 +203,11 @@ def panel_alive() -> bool:
 
 
 def upstream_ready() -> bool:
-    """OpenCode 后端是否已经可用（代理的 /healthz 会去探它）。"""
+    """当前引擎是否已经可用（我们的 /healthz 会去问它）。
+
+    ⚠ 这里问的是**我们的** 8787，不是 OpenCode —— server.py 的 /healthz 是按当前引擎答的，
+      所以 ACP 模式下它照样能就绪（不需要 OpenCode）。
+    """
     try:
         with urllib.request.urlopen(f"{URL}/healthz", timeout=4) as r:
             return bool(json.loads(r.read().decode("utf-8")).get("ok"))
@@ -187,19 +215,91 @@ def upstream_ready() -> bool:
         return False
 
 
-def wait_upstream(timeout: float = 45.0) -> bool:
-    """等 OpenCode 后端就绪再开窗，避免开出一个"连不上"的页面。
-    等待期间若 OpenCode 退出了，就直接放弃开窗。"""
+def engine_status() -> dict:
+    """问面板服务：当前引擎 + 每个引擎是否可用（server.py 的 /engine/status）。"""
+    try:
+        with urllib.request.urlopen(f"{URL}/engine/status", timeout=4) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def opencode_required(status: dict = None) -> bool:
+    """面板是否**必须**依赖 OpenCode（决定"要不要等它 / 最小化它 / 关窗时杀它"）。
+
+    - 引擎 = `acp`（或别的）→ **False**：面板独立跑，完全不碰 OpenCode；
+    - 引擎 = `opencode` 且它确实可用 → True（保留原来的启动/最小化/关窗联动）；
+    - 引擎 = `opencode` 但**没装**（`engines[].available == False`）→ False：别死等一个不存在的后端；
+    - 拿不到引擎信息（服务还没起来 / 老后端没有 engines 字段）→ 回落到"OpenCode 在跑就当它需要"，
+      这样探测失败时行为与改造前一致。
+    """
+    st = status if isinstance(status, dict) else engine_status()
+    active = str((st or {}).get("active") or "")
+    if not active:
+        return opencode_running()
+    if active != "opencode":
+        return False
+    for e in ((st or {}).get("engines") or []):
+        if isinstance(e, dict) and str(e.get("id")) == "opencode" and e.get("available") is False:
+            return False
+    return True
+
+
+def should_open_now(required: bool, running: bool, alive: bool,
+                    skip_open: bool, closed_at) -> bool:
+    """该不该开面板窗口（纯函数，方便单测；main() 直接用它）。
+
+    ⚠ 关键区别：`required=True`（opencode 模式）时**必须** OpenCode 在跑才开；
+      `required=False`（ACP 模式）只看"窗口没开 + 用户没主动关过 + 不在反悔期"。
+    """
+    if alive or skip_open or closed_at is not None:
+        return False
+    return bool(running) if required else True
+
+
+def should_kill_on_close(required: bool, browser_alive: bool = False) -> bool:
+    """关窗后要不要执行"联动关 OpenCode"（ACP 模式不关任何东西）。
+
+    ⚠ `browser_alive` 是**第二道确认**：心跳超时可能只是页面被节流/卡住（2026-09-26 实测踩过：
+      并行跑测试把页面定时器压到 8s 没发心跳 → 守护进程判定"窗口已关" → 差点在反悔期后
+      杀掉 OpenCode，连带杀掉正在跑的会话）。所以只有"浏览器进程也真的没了"才联动。
+    """
+    return bool(required and KILL_OPENCODE and not browser_alive)
+
+
+def panel_browser_alive(proc=None, adopted_pid: int = 0) -> tuple:
+    """面板浏览器还活着吗 → `(alive, pid)`。心跳失灵时的兜底（较贵，只在反悔期结束时用）。
+
+    判据按可靠性：① 我们自己拉起的窗口进程句柄（最准，0 成本）
+    → ② 采纳的外部窗口 PID（廉价存活检查）→ ③ 按专属 profile 现查一次（要起 PowerShell）。
+    """
+    if proc is not None and proc.poll() is None:
+        return True, int(getattr(proc, "pid", 0) or 0)
+    if adopted_pid and pid_alive(adopted_pid):
+        return True, int(adopted_pid)
+    found = panel_main_pid()
+    return (bool(found), found)
+
+
+def should_minimize_opencode(required: bool) -> bool:
+    """开完面板后要不要最小化 OpenCode 自己的窗口。"""
+    return bool(required)
+
+
+def wait_upstream(timeout: float = 45.0, required: bool = True) -> bool:
+    """等后端就绪再开窗，避免开出一个"连不上"的页面。
+    等待期间若（opencode 模式下）OpenCode 退出了，就直接放弃开窗。"""
     if upstream_ready():
         return True
-    log("OpenCode 后端尚未就绪，等它起来再开窗…")
+    log("后端尚未就绪，等它起来再开窗…")
     t0 = time.time()
     while time.time() - t0 < timeout:
         time.sleep(1.0)
         if upstream_ready():
             log(f"后端已就绪（等待 {time.time() - t0:.0f}s）")
             return True
-        if not opencode_running():
+        if required and not opencode_running():
             log("等待期间 OpenCode 已退出，取消开窗")
             return False
     log(f"等待后端超时（{timeout:.0f}s），仍然开窗（页面会自动重连）")
@@ -369,8 +469,8 @@ def close_window() -> None:
        "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
 
 
-def open_window(hide_taskbar: bool = True):
-    wait_upstream()                          # ★ 先等后端可用，避免开出连不上的页面
+def open_window(hide_taskbar: bool = True, required: bool = True):
+    wait_upstream(required=required)         # ★ 先等后端可用，避免开出连不上的页面
     os.makedirs(PROFILE_DIR, exist_ok=True)
     for exe in BROWSERS:
         if os.path.isfile(exe):
@@ -384,21 +484,23 @@ def open_window(hide_taskbar: bool = True):
                  "--disable-features=Translate,MediaRouter"],
                 creationflags=NO_WINDOW,
             )
-            # 等面板窗口先露面，再把 OpenCode 自己的窗口最小化
+            # 等面板窗口先露面，再把 OpenCode 自己的窗口最小化（ACP 模式下不碰它）
             time.sleep(MINIMIZE_DELAY)
-            try:
-                minimize_opencode()
-            except Exception as exc:  # noqa: BLE001
-                log(f"最小化 OpenCode 失败: {exc}")
+            if should_minimize_opencode(required):
+                try:
+                    minimize_opencode()
+                except Exception as exc:  # noqa: BLE001
+                    log(f"最小化 OpenCode 失败: {exc}")
             return proc
     log("没找到 Edge/Chrome，退回默认浏览器打开")
     taskbar_sync(hide_taskbar)               # 开关关掉时这里不会隐藏
     os.startfile(URL)  # noqa: S606
     time.sleep(MINIMIZE_DELAY)
-    try:
-        minimize_opencode()
-    except Exception as exc:  # noqa: BLE001
-        log(f"最小化 OpenCode 失败: {exc}")
+    if should_minimize_opencode(required):
+        try:
+            minimize_opencode()
+        except Exception as exc:  # noqa: BLE001
+            log(f"最小化 OpenCode 失败: {exc}")
     return None
 
 
@@ -411,15 +513,17 @@ def main() -> int:
         return 0
 
     once = "--once" in sys.argv
-    log(f"守护进程启动（关窗联动关 OpenCode: {KILL_OPENCODE}）")
-
+    log(f"守护进程启动（面板 {PORT} / 锁 {LOCK_PORT} / 音乐 {MUSIC_PORT}；"
+        f"关窗联动关 OpenCode: {KILL_OPENCODE}）")
     if not once:
         lock = socket.socket()
         try:
             lock.bind((HOST, LOCK_PORT))
             lock.listen(1)
         except OSError:
-            log("已有守护进程在运行，退出")
+            log(f"端口 {LOCK_PORT} 已被占用 → 判定已有守护进程在运行，退出"
+                f"（若这是另一个副本：开发版用 8787/8788，安装版用 17887/17888，"
+                f"想换端口就改 runtime/state/_panel.json）")
             return 0
         atexit.register(restore_taskbar_if_marked)   # 守护退出（正常路径）时兜底恢复
 
@@ -443,14 +547,18 @@ def main() -> int:
         restore_taskbar_if_marked()          # 开关关掉 / 上次留下"隐藏"标记 → 自愈恢复
 
     running = opencode_running()
+    # 面板要不要依赖 OpenCode：引擎是 acp 时**完全不依赖**（可以脱离 OpenCode 单独跑）
+    required = opencode_required()
+    log(f"面板是否需要 OpenCode: {required}"
+        + ("（引擎 = acp → 独立运行）" if not required else ""))
 
     if once:
         if not alive:
-            open_window(hide_taskbar=taskbar_pref)
+            open_window(hide_taskbar=taskbar_pref, required=required)
         return 0
 
-    if running and not alive:
-        proc = open_window(hide_taskbar=taskbar_pref)
+    if should_open_now(required, running, alive, False, None):
+        proc = open_window(hide_taskbar=taskbar_pref, required=required)
         opened_at = time.time()
         alive = True
 
@@ -504,31 +612,42 @@ def main() -> int:
                 log("窗口又开回来了 → 取消关闭")
                 closed_at = None
             elif time.time() - closed_at >= GRACE_SECONDS:
-                taskbar_sync(False)              # 面板确实关了 → 恢复（只恢复我们藏过的）
-                if KILL_OPENCODE:
-                    kill_opencode()
-                closed_at = None
-                skip_open = True                 # 这是"我要退出"的意图
-                log("反悔期结束 → 已执行联动")
+                # ⚠ 心跳说"关了"还不够：可能只是页面被节流/卡住。先确认浏览器进程真没了，
+                #    否则不联动（宁可这次不关，也不能误杀正在跑的会话）。
+                browser_alive, bpid = panel_browser_alive(proc, adopted_pid)
+                if browser_alive:
+                    log("心跳断了但浏览器进程还在 → 当作还开着，不联动")
+                    adopted_pid = bpid or adopted_pid
+                    if proc is not None and proc.poll() is not None:
+                        proc = None
+                    closed_at = None
+                else:
+                    taskbar_sync(False)          # 面板确实关了 → 恢复（只恢复我们藏过的）
+                    if should_kill_on_close(required, browser_alive=False):
+                        kill_opencode()
+                    closed_at = None
+                    skip_open = True             # 这是"我要退出"的意图
+                    log("反悔期结束 → 已执行联动")
 
         # ---- ④ OpenCode 状态（较贵，降频检查）----
         if now - last_oc >= POLL_SECONDS:
             running = opencode_running()
             last_oc = now
+            required = opencode_required()       # 用户可能中途换了引擎（opencode ↔ acp）
             if not running:
                 skip_open = False                # OpenCode 已退出 → 解除抑制
 
-        # ---- ⑤ OpenCode 在跑但窗口没开 → 开窗 ----
+        # ---- ⑤ 该开窗但没开 → 开窗 ----
         # 关键：反悔期内（closed_at 未清）绝不能抢着重开，否则会"关掉就被重开"、
         # 反悔期被新窗口的心跳取消，kill 永远执行不到 —— 必须等反悔期走完。
-        if running and not fresh and not skip_open and closed_at is None:
-            log("检测到 OpenCode 在运行且窗口未开 → 打开面板窗口")
-            proc = open_window(hide_taskbar=taskbar_pref)
+        if should_open_now(required, running, fresh, skip_open, closed_at):
+            log("面板窗口未开且允许打开 → 打开面板窗口")
+            proc = open_window(hide_taskbar=taskbar_pref, required=required)
             opened_at = time.time()
             fresh = True
 
         # ---- ⑥ 可选：OpenCode 退出时也关掉窗口（默认关，见模块顶部常量）----
-        if CLOSE_WINDOW_WHEN_OPENCODE_EXITS and was_open and not running:
+        if CLOSE_WINDOW_WHEN_OPENCODE_EXITS and required and was_open and not running:
             close_window()
             fresh = False
 

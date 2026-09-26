@@ -5,6 +5,12 @@
     "bytes": 3937,
     "fill": "#4D6BFE"
   },
+  "anthropic": {
+    "file": "anthropic.svg",
+    "source": "https://models.dev/logos/anthropic.svg",
+    "bytes": 365,
+    "fill": "#D97757"
+  },
   "xiaomi": {
     "file": "xiaomi.svg",
     "source": "https://cdn.simpleicons.org/xiaomi",

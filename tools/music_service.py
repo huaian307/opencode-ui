@@ -151,10 +151,47 @@ def _ne_data(r) -> dict:
     return (r or {}).get("data") or {}
 
 
+def _ne_http_json(url: str, cookie: str) -> dict:
+    """直连 music.163.com 老接口（不走 SDK 的 eapi/weapi 签名）。"""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA, "Referer": "https://music.163.com/", "Cookie": cookie or ""})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _ne_track(it: dict) -> dict:
+    al = it.get("al") or it.get("album") or {}
+    ar = it.get("ar") or it.get("artists") or []
+    return {"id": it.get("id"), "name": it.get("name"),
+            "artists": " / ".join(a.get("name", "") for a in ar),
+            "album": al.get("name", ""), "cover": al.get("picUrl", ""),
+            "duration": int((it.get("dt") or it.get("duration") or 0) / 1000)}
+
+
 def ne_playlists() -> dict:
-    """登录用户自己的歌单（网易云）。需要 Cookie 含 MUSIC_U，否则 account 为 null。"""
-    api = get_api()
+    """登录用户自己的歌单（网易云）。需要 Cookie 含 MUSIC_U。
+
+    ⚠ SDK 的 eapi `/user/account` 对浏览器 Cookie 可能返回 `account:null`
+    （实测本机：老接口能认，eapi 不认）。所以优先走老接口 `/api/nuser/account/get` +
+    `/api/user/playlist`，失败再回退 SDK。
+    """
     ck = read_cookies()["netease"]
+    if ck:
+        try:
+            acc = _ne_http_json("https://music.163.com/api/nuser/account/get", ck)
+            uid = (acc.get("account") or {}).get("id") or (acc.get("profile") or {}).get("userId")
+            if uid:
+                pl = _ne_http_json("https://music.163.com/api/user/playlist/?uid=%s&limit=100&offset=0" % uid, ck)
+                out = []
+                for p in (pl.get("playlist") or []):
+                    out.append({"id": p.get("id"), "name": p.get("name") or "",
+                                "count": p.get("trackCount") or 0, "cover": p.get("coverImgUrl") or "",
+                                "creator": (p.get("creator") or {}).get("nickname") or ""})
+                return {"ok": True, "uid": uid, "playlists": out}
+        except Exception:  # noqa: BLE001
+            pass
+
+    api = get_api()
     acc = _ne_data(api.request("/user/account", {"cookie": ck}))
     uid = (acc.get("account") or {}).get("id") or (acc.get("profile") or {}).get("userId")
     if not uid:
@@ -169,18 +206,22 @@ def ne_playlists() -> dict:
 
 
 def ne_playlist_songs(pid, limit: int = 300) -> list:
-    api = get_api()
+    """歌单歌曲。优先老接口 `/api/v6/playlist/detail`（实测带 Cookie 能拿全），失败回退 SDK。"""
     ck = read_cookies()["netease"]
+    if ck:
+        try:
+            d = _ne_http_json("https://music.163.com/api/v6/playlist/detail?id=%s&n=%s"
+                              % (pid, max(1, int(limit))), ck)
+            tracks = ((d.get("playlist") or {}).get("tracks") or [])
+            if tracks:
+                return [_ne_track(t) for t in tracks]
+        except Exception:  # noqa: BLE001
+            pass
+
+    api = get_api()
     d = _ne_data(api.request("/playlist/track/all", {"id": pid, "limit": limit, "offset": 0, "cookie": ck}))
     songs = d.get("songs") or d.get("tracks") or []
-    out = []
-    for s in songs:
-        al = s.get("al") or {}
-        out.append({"id": s.get("id"), "name": s.get("name"),
-                    "artists": " / ".join(a.get("name", "") for a in (s.get("ar") or [])),
-                    "album": al.get("name", ""), "cover": al.get("picUrl", ""),
-                    "duration": int((s.get("dt") or 0) / 1000)})
-    return out
+    return [_ne_track(s) for s in songs]
 
 
 # ---------------- QQ音乐（算法来自 Mineradio server.js，纯标准库）----------------

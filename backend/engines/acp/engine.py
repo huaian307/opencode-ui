@@ -15,6 +15,7 @@ import json
 import os
 import queue
 import re
+import threading
 import urllib.parse
 
 from ..base import Engine
@@ -42,7 +43,9 @@ class AcpEngine(Engine):
     label = "ACP"
 
     def __init__(self):
-        self._service = None
+        # 每个 agent id 一个 AcpService（也就是一个常驻子进程）：切回旧 agent 不重启。
+        self._services = {}
+        self._services_lock = threading.RLock()
         self._config = None
 
     # ---------------- 自述 ----------------
@@ -62,7 +65,14 @@ class AcpEngine(Engine):
             cfg = dict(a)
             cfg["cwd"] = a.get("cwd") or b.get("cwd") or ""
             cfg["env"] = env
-            cfg["_baseline"] = b
+            # 审批模式：**agent 自己的 `mode` 覆盖共享基线**。不同 agent 的模式名不一样
+            # （Codex：read-only / agent / agent-full-access；OpenCode：build / plan），
+            # 全局只写一个 baseline.mode 会对不上——对不上时后端会跳过并记一行日志。
+            b2 = dict(b)
+            if a.get("mode"):
+                b2["mode"] = a["mode"]
+            cfg["mode"] = b2.get("mode") or ""
+            cfg["_baseline"] = b2
             self._config = cfg
         return self._config
 
@@ -90,35 +100,74 @@ class AcpEngine(Engine):
         return [agents.public(a, det) for a in (agents.load_registry().get("agents") or [])]
 
     def select_agent(self, aid: str) -> bool:
-        """切换当前 agent：关掉旧子进程，下次用新命令启动。"""
+        """切换当前 agent。**不关旧的**：每个 agent 一个常驻 AcpService，切回不重启。"""
         if not agents.set_active(aid):
             return False
         self._config = None
-        self.shutdown()
+        threading.Thread(target=self.prewarm, daemon=True).start()
         return True
 
     def patch_agent(self, aid: str, patch: dict) -> dict:
         a = agents.update_agent(aid, patch)
         if a:
             self._config = None
-            if str(aid) == self.active_agent_id():
-                self.shutdown()
+            # 只有启动相关字段变了才重启这个 agent 的进程；只改 label/note 不动
+            if any(k in patch for k in ("command", "env", "cwd", "provider")):
+                self.shutdown_agent(str(aid))
         return a
 
     def autofill_agents(self) -> dict:
-        """自动检测并补全「命令不可用」的 agent；会关掉旧子进程。"""
+        """自动检测并补全「命令不可用」的 agent；只关被改动的 agent。"""
         r = agents.autofill()
         self._config = None
-        self.shutdown()
+        for aid in (r.get("changed") or []):
+            self.shutdown_agent(str(aid))
         return r
 
-    def add_agent(self, label, command, cwd="", env=None, note=""):
-        a = agents.add_agent(label, command, cwd, env, note)
+    def add_agent(self, label, command, cwd="", env=None, note="", provider=""):
+        a = agents.add_agent(label, command, cwd, env, note, provider)
         self._config = None
         return a
 
     def remove_agent(self, aid) -> bool:
-        return agents.remove_agent(aid)
+        ok = agents.remove_agent(aid)
+        if ok:
+            self.shutdown_agent(str(aid))
+        return ok
+
+    def set_baseline_env(self, patch: dict) -> dict:
+        """写共享基线的环境变量（模型 API Key）。
+
+        ⚠ 环境变了，**所有** ACP 子进程都得重起（它们启动时把 env 传给子进程），
+          所以这里清掉配置缓存 + 关掉所有 AcpService；下次用的时候按需重拉。
+        """
+        b = agents.update_baseline_env(patch)
+        self._config = None
+        with self._services_lock:
+            ids = list(self._services.keys())
+        for aid in ids:
+            self.shutdown_agent(str(aid))
+        return b
+
+    def baseline_view(self) -> dict:
+        """给界面看的基线视图：**只给掩码**，绝不出明文。"""
+        b = agents.baseline()
+        env = b.get("env") if isinstance(b.get("env"), dict) else {}
+        return {"cwd": b.get("cwd") or "", "mode": b.get("mode") or "",
+                "env": {str(k): agents.mask_secret(v) for k, v in env.items()},
+                "envNames": sorted(str(k) for k in env.keys())}
+
+    def prewarm(self):
+        """启动当前 agent 的子进程并顺手拿一次模型清单（不弹命令、不建会话）。"""
+        try:
+            svc = self.service()
+            svc.ensure_started()
+            try:
+                svc.ensure_model_config()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
 
     def healthz(self):
         if not self.available():
@@ -129,28 +178,49 @@ class AcpEngine(Engine):
         return 200, {"ok": True, "engine": "acp", "note": "尚未启动 agent（首次建会话时拉起）"}
 
     def service_running(self) -> bool:
-        return bool(self._service and self._service.running())
+        with self._services_lock:
+            svc = self._services.get(self.active_agent_id())
+        return bool(svc and svc.running())
 
     def service(self) -> AcpService:
-        if self._service is None:
+        """当前 agent 的 AcpService（按 agent id 缓存，切回不重启）。"""
+        aid = self.active_agent_id()
+        with self._services_lock:
+            svc = self._services.get(aid)
+            if svc is not None:
+                return svc
             cfg = self.config()
             command = cfg.get("command")
             if not command:
                 raise RuntimeError("未配置 ACP agent 命令：runtime/state/_acp.json 缺少 command")
-            self._service = AcpService(command, cwd=cfg.get("cwd"),
-                                       env=cfg.get("env"), log=lambda s: None,
-                                       agent_id=self.active_agent_id(),
-                                       baseline=cfg.get("_baseline") or {})
-        return self._service
+            svc = AcpService(command, cwd=cfg.get("cwd"),
+                             env=cfg.get("env"), log=lambda s: None,
+                             agent_id=aid,
+                             provider_id=cfg.get("provider") or "",
+                             baseline=cfg.get("_baseline") or {})
+            self._services[aid] = svc
+            return svc
 
-    def shutdown(self):
-        """收起 agent 子进程（供联调脚本退出时调用）。"""
-        if self._service is not None:
+    def shutdown_agent(self, aid: str) -> None:
+        """只收起某个 agent 的子进程（配置变更 / 删除该 agent 时用）。"""
+        with self._services_lock:
+            svc = self._services.pop(str(aid), None)
+        if svc is not None:
             try:
-                self._service.close()
+                svc.close()
             except Exception:  # noqa: BLE001
                 pass
-            self._service = None
+
+    def shutdown(self):
+        """收起所有 agent 子进程（供联调脚本 / 服务退出时调用）。"""
+        with self._services_lock:
+            services = list(self._services.values())
+            self._services.clear()
+        for svc in services:
+            try:
+                svc.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---------------- HTTP 分派 ----------------
 
@@ -165,7 +235,8 @@ class AcpEngine(Engine):
                     svc.ensure_model_config()      # 重启/切 agent 后旧会话也能拿到清单
                 except Exception:  # noqa: BLE001
                     pass
-                return handler._send_json(200, {"data": svc.models()})
+                return handler._send_json(200, {"location": {"directory": svc.cwd},
+                                                "data": svc.models()})
             if path == "/api/model/default" and method == "GET":
                 svc = self.service()
                 try:
@@ -175,11 +246,53 @@ class AcpEngine(Engine):
                 d = svc.model_default()
                 if not d:
                     return handler._send_json(404, {"error": "尚不知道默认模型（先新建一个会话）"})
-                return handler._send_json(200, {"data": d})
+                return handler._send_json(200, {"location": {"directory": svc.cwd}, "data": d})
+            if path == "/api/agent" and method == "GET":
+                # 与 OpenCode /api/agent 形状对齐；ACP 里「agent」对应会话的审批模式
+                svc = self.service()
+                try:
+                    svc.ensure_model_config()
+                except Exception:  # noqa: BLE001
+                    pass
+                return handler._send_json(200, {"location": {"directory": svc.cwd},
+                                                "data": svc.agents()})
+            if path == "/api/permission/always":
+                # 权限「始终允许」的记忆（面板还没入口，先把接口与数据铺好）
+                svc = self.service()
+                if method == "GET":
+                    sid = str((urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+                               .get("session") or [""])[0]) or None
+                    return handler._send_json(200, {"ok": True, "agent": svc.agent_id,
+                                                    "data": svc.always_rules(sid)})
+                if method == "DELETE":
+                    b = handler._read_json_body() or {}
+                    n = svc.forget_always(sid=b.get("session") or None,
+                                          kind=b.get("kind") or None,
+                                          rule_id=b.get("id") or None)
+                    return handler._send_json(200, {"ok": True, "removed": n})
+                return handler._send_json(405, {"error": "GET/DELETE only"})
+            # ⚠ 这两条必须在下面的 /api/session/<id> 正则**之前**判，
+            #    否则 "remote" / "import" 会被当成会话 id。
+            if path == "/api/session/remote" and method == "GET":
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+                return handler._send_json(200, self.service().list_remote(
+                    cwd=(q.get("cwd") or [""])[0] or None,
+                    cursor=(q.get("cursor") or [""])[0] or ""))
+            if path == "/api/session/import" and method == "POST":
+                b = handler._read_json_body() or {}
+                try:
+                    s = self.service().import_remote(b.get("id") or b.get("sessionId"),
+                                                      b.get("title"))
+                except ValueError as exc:
+                    return handler._send_json(400, {"error": str(exc)})
+                except Exception as exc:  # noqa: BLE001
+                    return handler._send_json(500, {"error": "%s: %s" % (type(exc).__name__, exc)})
+                return handler._send_json(200, {"data": s})
             if path == "/api/session":
                 if method == "GET":
                     limit = _q_int(handler.path, "limit", 50)
-                    return handler._send_json(200, {"data": self.service().list_sessions()[:limit]})
+                    data = self.service().list_sessions()[:limit]
+                    return handler._send_json(200, {"data": data, "cursor": None})
                 if method == "POST":
                     b = handler._read_json_body() or {}
                     loc = (b.get("location") or {}).get("directory")
@@ -208,13 +321,20 @@ class AcpEngine(Engine):
                     return handler._send_json(404, {"error": "会话不存在"})
                 return _empty(handler, 204)
             if method == "DELETE":
+                try:
+                    svc.close_agent_session(sid)   # best-effort：告诉 agent 侧 close/delete
+                except Exception:  # noqa: BLE001
+                    pass
                 svc.delete_session(sid)
                 return _empty(handler, 204)
             return handler._send_json(405, {"error": "GET/PATCH/DELETE only"})
 
         if rest == "message" and method == "GET":
             limit = _q_int(handler.path, "limit", 80)
-            return handler._send_json(200, {"data": svc.messages(sid, limit)})
+            cursor = str((urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+                          .get("cursor") or [""])[0])
+            msgs, next_cursor = svc.messages(sid, limit, cursor)
+            return handler._send_json(200, {"data": msgs, "cursor": next_cursor})
         if rest == "prompt" and method == "POST":
             b = handler._read_json_body() or {}
             try:
@@ -232,10 +352,18 @@ class AcpEngine(Engine):
             b = handler._read_json_body() or {}
             svc.set_model(sid, b.get("model"))
             return _empty(handler, 204)
+        if rest == "agent" and method == "POST":
+            b = handler._read_json_body() or {}
+            if not svc.set_agent(sid, b.get("agent")):
+                return handler._send_json(400, {
+                    "error": "切换模式失败（该 agent 可能不支持，或会话没接回）"})
+            return _empty(handler, 204)
         if rest == "form" and method == "GET":
             return handler._send_json(200, {"data": svc.list_forms(sid)})
         if rest == "permission" and method == "GET":
-            return handler._send_json(200, {"data": svc.list_permissions(sid)})
+            # 顺带把这条会话的「始终允许」记忆带回去（前端可显示"已记住"）
+            return handler._send_json(200, {"data": svc.list_permissions(sid),
+                                            "always": svc.always_rules(sid)})
 
         mf = re.match(r"^form/([^/]+)/reply$", rest)
         if mf and method == "POST":

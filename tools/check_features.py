@@ -60,7 +60,12 @@ CHECKS = [
     ("消息", "未知结构兜底展示", r"原始数据"),
     ("消息", "内容指纹（避免重建整块）", r"function signatureOf"),
     ("消息", "重渲染时保住展开状态", r"details\[data-k\]"),
-    ("消息", "空会话首屏卡片", r"HERO_HTML"),
+    ("消息", "空会话首屏卡片", r"function heroHtml\("),
+    ("外观", "★首屏主图/贴纸/文案可自定义（SET.heroL1）", r"heroL1"),
+    ("外观", "自定义素材走 /appearance/img 代理", r"/appearance/img\?k="),
+    ("外观", "选图走原生对话框 /pick/image", r'api\("/pick/image"'),
+    ("外观", "★素材清单接口 /appearance", r'api\("/appearance"\)'),
+    ("外观", "换图后重画首屏与消息区", r"function refreshAppearanceArt"),
     ("消息", "Markdown 块级渲染(表格/列表/引用)", r"function renderBlocks"),
     ("消息", "Markdown 行内渲染(链接/加粗/斜体)", r"function inlineMd"),
     ("消息", "GFM 表格识别", r"MD_SEP"),
@@ -173,6 +178,7 @@ CHECKS = [
     ("音乐", "条内结果渲染", r"function renderBarResults"),
     ("音乐", "平台切换(网易云/QQ)", r"\.wp-pb"),
     ("音乐", "已移除音乐条歌单按钮", r"NOT:p-lib"),
+    ("音乐", "歌词位置按采样时间补时", r"MUSIC\.posAt = Number\(\(MUSIC\.state \|\| \{\}\)\.ts\)"),
     ("音乐", "推荐歌单封面", r"/music/cover\?p="),
     ("音乐", "选完歌单清封面缓存", r'api\("/music/cover/clear"'),
     ("音乐", "歌曲行封面(条内)", r'coverHtml\(it, "it-cover"\)'),
@@ -195,6 +201,11 @@ CHECKS = [
     ("模型", "本地图标目录", r'MODEL_ICON_DIR = "/assets/models/"'),
     ("模型", "顶栏用图标代替名字", r"b\.innerHTML = modelIconHtml"),
     ("模型", "无品牌标用字母徽章", r"micon-mono"),
+    ("模型", "默认模型文案中性化", r"跟随引擎默认"),
+    ("模型", "未知费用不谎报免费", r"费用未知"),
+    ("设置", "首次设置向导", r"async function openSetup"),
+    ("设置", "首次设置记账键", r'opencode-ui\.setup\.v1'),
+    ("设置", "首次设置应用引擎/agent", r"async function setupNext"),
     # ---- 微信（截图+OCR 只读识别；回复必须二次确认）----
     # ---- 龙族视觉 + 歌词翻译 ----
     ("龙族", "歌词翻译开关", r'\$\("cfg-zh"\)'),
@@ -207,6 +218,33 @@ CHECKS = [
     ("引擎", "引擎切换接口", r'api\("/engine",\s*\{\s*method:\s*"POST"'),
     ("引擎", "切换后重连 SSE(防旧引擎事件)", r'if \(typeof connectEvents === "function"\) connectEvents\(\);'),
     ("引擎", "无引擎时优雅禁用下拉", r'sel\.disabled = true'),
+    # ---- 默认 agent / 模型中性化（provider 有入口、引擎能看出可用性）----
+    ("中性化", "★引擎下拉标出「未就绪」", r"（未就绪）"),
+    ("中性化", "不可用引擎禁选", r'value="\$\{esc\(id\)\}"\$\{ok \? "" : " disabled"\}'),
+    ("中性化", "记住引擎自述（label/available）", r"ENGINE\.engines"),
+    ("中性化", "向导自动落到可用引擎并说明", r"已先帮你选到可用的"),
+    ("中性化", "卡片显示 provider 徽章", r'class="badge">\$\{esc\(prov\)\}'),
+    ("中性化", "provider 推断提示（≈）", r"≈\$\{esc\(guess\)\}"),
+    ("中性化", "★agent 编辑弹窗（含 provider）", r"function editAgentCommand"),
+    ("中性化", "provider 一键自动推断", r"async function guessAgentProvider"),
+    ("中性化", "保存 agent 编辑（名称/命令/目录/provider）", r"async function saveAgentEdit"),
+    ("中性化", "命令解析（引号包住含空格路径）", r"function parseCmd"),
+    ("中性化", "ACP 说明文案中立", r"选择要驱动的 ACP agent"),
+    ("中性化", "★模型 id 的 provider 前缀也用来找图标", r'id\.split\("/"\)\[0\]'),
+    ("中性化", "已删除点名 Codex/dsh 的旧文案", r"NOT:Codex / dsh / …"),
+    ("可选组件", "★前端显示「音乐服务未安装」", r"async function musicComponent"),
+    ("可选组件", "未装时搜索直接拦下（不撞 502）", r"MUS\.installed === false"),
+    ("API Key", "★设置里能填/清模型 Key", r"async function saveApiKey"),
+    ("API Key", "按 provider 猜变量名", r"KEY_NAME_BY_PROVIDER"),
+    ("API Key", "打开设置就拉（只拿掩码）", r'loadApiKeyRow\("cfg"\)'),
+    # ---- 智能体 / 模式切换 ----
+    ("模式", "★模式清单接口 /api/agent", r'api\("/api/agent"\)'),
+    ("模式", "★切换模式：POST /api/session/{id}/agent", r"/agent`,\s*\{\s*method:\s*\"POST\""),
+    ("模式", "★过滤内部 agent（hidden）", r"!a\.hidden"),
+    ("模式", "新会话默认模式落盘", r"MODE_KEY"),
+    ("模式", "新建会话后补一次应用", r"async function ensureSessionMode"),
+    ("模式", "顶栏按钮文案跟随会话", r"function renderModeButton"),
+    ("模式", "跟随引擎默认（清本地默认）", r"mode-default"),
 ]
 
 # index.html 也要有：龙族标记 / 弹窗 / 控件（这些不是 app.js 里的东西）
@@ -215,6 +253,27 @@ HTML_CHECKS = [
     ("龙族", "弹窗标题引用校徽", r'<use href="#mk-tree"'),
     ("龙族", "设置里的歌词翻译开关", r'id="cfg-zh"'),
     ("设置", "设置里的任务栏开关", r'id="cfg-taskbar"'),
+    ("设置", "设置里的首次设置按钮", r'id="cfg-setup"'),
+    ("设置", "首次设置弹窗", r'id="setup"'),
+    ("设置", "首次设置引擎下拉", r'id="setup-engine"'),
+    ("中性化", "agent 编辑弹窗", r'id="agent-edit"'),
+    ("中性化", "编辑弹窗里的 provider 输入", r'id="ae-provider"'),
+    ("API Key", "设置里的 Key 输入框", r'id="cfg-key-value"'),
+    ("模式", "★顶栏模式按钮", r'id="btn-agent"'),
+    ("模式", "模式弹窗", r'id="mode-list"'),
+    ("模式", "弹窗标题（智能体/模式）", r'id="mode-title"'),
+    ("API Key", "向导里的 Key 行", r'id="setup-key-row"'),
+    ("API Key", "★变量名改成只读标签（不再两个输入框）", r'id="cfg-key-var"'),
+    ("API Key", "向导里的变量名只读标签", r'id="setup-key-var"'),
+    ("外观", "头像/素材选择行（data-img）", r'data-img="brand"'),
+    ("外观", "空会话主图可换", r'data-img="hero"'),
+    ("外观", "空会话贴纸可换", r'data-img="sticker2"'),
+    ("外观", "空会话文案可改", r'id="cfg-hero-l1"'),
+    ("外观", "空会话署名可改", r'id="cfg-hero-credit"'),
+    ("中性化", "provider 自动推断按钮", r'id="ae-guess"'),
+    ("中性化", "编辑按钮文案（不再只改命令）", r'编辑当前 agent…'),
+    ("设置", "首次设置 agent 下拉", r'id="setup-agent"'),
+    ("设置", "首次设置模型下拉", r'id="setup-model"'),
     ("设置", "设置里的左上角名字输入框", r'id="cfg-brand"'),
     ("设置", "设置里的小标签输入框", r'id="cfg-brand-sub"'),
     ("设置", "侧栏小标签元素", r'id="brand-sub"'),
@@ -265,7 +324,164 @@ CSS_CHECKS = [
     ("音乐", "主页歌曲封面样式", r"\.mus-song \.s-cover"),
     ("壁纸", "目录用等宽字体(反斜杠不显成￥)", r"#cfg-wall-root \{ font-family: var\(--mono\)"),
     ("引擎", "引擎下拉样式", r"#cfg-engine \{"),
+    ("主题", "白昼面板也用毛玻璃", r'(?s)\[data-theme="hiru"\] #sidebar.*?backdrop-filter: blur\(10px\)'),
+    ("主题", "数学符号字体兜底", r"Cambria Math"),
+    ("设置", "★宽行布局（防止 label 被挤成竖排）", r"\.cfg-row\.wide\s*\{"),
+    ("设置", "密码框也有样式（不是白框）", r'input\[type="password"\]'),
+    ("模式", "★顶栏模式按钮放开 34px 宽度（踩坑 #24）", r"#topbar \.actions #btn-agent"),
 ]
+
+# ---- ACP 后端（backend/engines/acp/）----
+# 以前这个体检只看前端，后端改坏了没有任何网；ACP 那条线尤其需要
+# （事件映射 / 记忆 / 导入都是"看不见"的行为）。
+# Inno 安装脚本（注释是 `;`，单独扫）
+ISS_CHECKS = [
+    ("安装包", "★组件 payload 用 DirExists 判断（FileExists 对目录为假！）", r"DirExists\("),
+    ("安装包", "音乐/频谱组件声明", r"Name: \"music\""),
+    ("安装包", "随包 agent 组件声明（node/codex/claude）", r"Name: \"agent_node\""),
+    ("安装包", "Claude 适配器组件", r"Name: \"agent_claude\""),
+    ("安装包", "勾了适配器必带 node（Inno 代码守卫）", r"WizardSelectComponents\('agent_node'\)"),
+    ("安装包", "per-user 安装（不弹 UAC）", r"PrivilegesRequired=lowest"),
+    ("安装包", "卸载清 codex-home（运行时 state）", r'"\{app\}\\agents\\codex\\codex-home"'),
+    ("安装包", "卸载先按端口停进程（含安装版端口）", r"17888,17887,17990"),
+    ("安装包", "装完跑 init_state", r'init_state\.py"" --app-dir'),
+]
+
+PY_CHECKS = [
+    ("ACP事件", "★工具输出转字符串（不显示 [object Object]）", r"def normalize_output"),
+    ("ACP事件", "工具运行中输出 → session.tool.progress", r"session\.tool\.progress"),
+    ("ACP事件", "Codex 增量输出(_meta.terminal_output_delta)", r"def meta_progress"),
+    ("ACP事件", "计划 → session.plan.update", r"session\.plan\.update"),
+    ("ACP事件", "上下文占用 → session.usage.update", r"session\.usage\.update"),
+    ("ACP事件", "上下文压缩摘要进思考", r"compaction_summary_chunk"),
+    ("ACP事件", "★tool_call 自带 completed 要发 success", r'st == "completed"'),
+    ("ACP事件", "客户端宣告 terminal_output_delta", r'"terminal_output_delta": True'),
+    ("ACP事件", "计划绝不塞进 content（前端只会当原始 JSON）", r'NOT:"type": "plan"'),
+    ("ACP权限", "★「始终允许」记忆落盘", r'_acp_always\.json'),
+    ("ACP权限", "记住规则的字段", r"def _remember_always"),
+    ("ACP权限", "命中规则自动放行", r"def _match_always"),
+    ("ACP权限", "自动放行有事件可观测", r'"permission\.auto"'),
+    ("ACP权限", "清记忆接口", r"def forget_always"),
+    ("ACP会话", "★agent 侧会话列表 session/list", r'"session/list"'),
+    ("ACP会话", "导入已有会话", r"def import_remote"),
+    ("ACP会话", "空对象宣告(list: {})也算支持", r'"list" in caps'),
+    ("ACP会话", "agent 起的真名可自动改名", r"def _auto_title_ok"),
+    ("ACP会话", "用户改过的标题不被顶掉", r"def _on_session_info"),
+    ("ACP会话", "模式被 agent 改时同步", r"current_mode_update"),
+    ("ACP会话", "配置项权威回执", r"config_option_update"),
+    ("ACP会话", "★prompt 结果的 usage 累加进 tokens", r"cachedReadTokens"),
+    ("ACP会话", "stopReason → 结果", r"max_turn_requests"),
+    ("ACP接口", "拉 agent 侧会话的路由", r'"/api/session/remote"'),
+    ("ACP接口", "导入路由", r'"/api/session/import"'),
+    ("ACP接口", "记忆查询/清除路由", r'"/api/permission/always"'),
+    ("ACP接口", "模式清单（与 OpenCode 对齐）", r'"/api/agent"'),
+    ("ACP接口", "消息翻页 cursor", r"cursor"),
+    ("ACP进程", "★子进程强制 UTF-8（GBK 会把中文变乱码）", r"PYTHONIOENCODING"),
+    ("ACP中性", "★provider 可推断（env/命令/config.toml）", r"def guess_provider"),
+    ("ACP中性", "空值的 env 不算判断依据", r"if str\(v or \"\"\)\.strip\(\)"),
+    ("ACP中性", "读 Codex config.toml 猜 provider", r"_provider_from_codex_home"),
+    ("ACP中性", "bootstrap 不预设默认 agent", r'reg = \{"active": "", "agents": agents\}'),
+    ("ACP中性", "bootstrap 只挑「真的可用」当 active", r"if status_of\(a, det\)\[\"available\"\]"),
+    ("ACP中性", "add_agent 自动补 provider", r'a\["provider"\] = guess_provider\(a\)'),
+    ("ACP中性", "autofill 只补空的 provider", r"filledProviders"),
+    ("ACP中性", "public 给出 providerGuess 建议", r"providerGuess"),
+    ("ACP中性", "Codex 默认项不再塞 OPENAI_API_KEY", r'NOT:"env": \{"OPENAI_API_KEY"'),
+    ("ACP中性", "引擎可用性自述 describe()", r"def describe"),
+    ("ACP中性", "/engine/status 带上引擎自述", r'"engines": engines\.describe\(\)'),
+    ("ACP中性", "编辑弹窗的 provider 推断接口", r'"guess-provider"'),
+    ("接口", "★版本号锚定 app.js（别取到 style.css 的 ?v=）", r"app\\\.js\\\?v="),
+    # ---- 脱离 OpenCode（面板独立运行）----
+    ("脱离OC", "★守护进程按引擎判定是否依赖 OpenCode", r"def opencode_required"),
+    ("脱离OC", "★开窗决策抽成纯函数（可单测）", r"def should_open_now"),
+    ("脱离OC", "ACP 模式关窗不杀任何东西", r"def should_kill_on_close"),
+    ("脱离OC", "ACP 模式不最小化 OpenCode 窗口", r"def should_minimize_opencode"),
+    ("脱离OC", "主循环用 should_open_now（不再只看 running）", r"should_open_now\(required, running, fresh, skip_open, closed_at\)"),
+    ("脱离OC", "引擎中途可切换（每轮重算 required）", r"required = opencode_required\(\)\s+#"),
+    ("脱离OC", "★默认引擎不再写死（第一个可用的）", r"def first_available_engine"),
+    ("脱离OC", "没有状态文件时用 first_available_engine", r"return first_available_engine\(\) or DEFAULT_ENGINE"),
+    ("脱离OC", "★启动器按引擎决定要不要起 OpenCode", r"def plan"),
+    ("脱离OC", "启动器 acp 模式跳过自愈", r'"heal": not panel_only'),
+    # ---- 子命令式 ACP（OpenCode 自带 `acp` 子命令）----
+    ("子命令ACP", "★识别「CLI 的 acp 子命令」这种形态", r"def find_subcommand_acp"),
+    ("子命令ACP", "已登记的规格含 opencode-cli", r'"opencode-cli\.exe"'),
+    ("子命令ACP", "OpenCode ACP 的信息（能力/能力说明）", r"OpenCode · ACP（子命令）"),
+    ("子命令ACP", "★扫描时按真实路径去重（junction 不会扫出两条）", r"os\.path\.realpath\(p\)"),
+    ("子命令ACP", "push 用真实路径做去重键", r"norm\.append\(os\.path\.realpath\(sx\)\.lower\(\)\)"),
+    ("子命令ACP", "选文件夹也能认出子命令式", r"hit = find_subcommand_acp\(\[d\]\)"),
+    ("子命令ACP", "候选复用规格里的名字", r"_spec_for_command\(cmd\)"),
+    ("子命令ACP", "扫到候选里也推送子命令式", r'push\(spec\["label"\], cmd,'),
+    ("子命令ACP", "★基线 mode 该 agent 没有就跳过（不报 -32602）", r"这个 agent 没有（可用："),
+    ("子命令ACP", "★每个 agent 自己的 mode 覆盖共享基线", r'b2\["mode"\] = a\["mode"\]'),
+    ("子命令ACP", "改模型以 agent 回执为准（不许盲信）", r"没被 agent 接受"),
+    ("子命令ACP", "public 回 mode 字段", r'"mode": str\(a\.get\("mode"\) or ""\)'),
+    ("子命令ACP", "patch 白名单含 mode", r'"provider", "mode"'),
+    # ---- 可选组件（安装包：音乐服务 / 音频频谱）----
+    ("可选组件", "★按组件找解释器（venv 或 site-packages）", r"def _component_python"),
+    ("可选组件", "安装包形态：自带解释器 + PYTHONPATH", r"def _component_env"),
+    ("可选组件", "音乐服务没装就静默跳过", r"if not MUSIC_SVC_PY:"),
+    ("可选组件", "频谱没装就静默跳过", r"if not AUDIO_PY:"),
+    ("可选组件", "★缺音乐服务时给人话（503 + reason）", r'"error": music_component\(\)\["reason"\]'),
+    ("可选组件", "组件自述接口 /music/component", r'"/music/component"'),
+    # ---- 安装包（packaging/）----
+    # ---- 安装包（packaging/ + tools/selftest.py，见 PY 扫描列表）----
+    ("安装包", "★payload 收集（核心/组件/agent）", r"def stage_agent"),
+    ("安装包", "可选组件按 site-packages 打包", r"def stage_components"),
+    ("安装包", "★安装时修 ._pth（嵌入式解释器隔离模式）", r"def fix_pth"),
+    ("安装包", "定位用户目录不依赖 LOCALAPPDATA", r"def env_path"),
+    ("安装包", "★组件目录也写进 ._pth（._pth 会忽略 PYTHONPATH）", r'\.\.\\\\runtime\\\\site-packages'),
+    ("安装包", "★安装版端口与开发版隔离（_panel.json）", r"def read_ports"),
+    ("安装包", "watch 支持 --port/--lock-port", r"--lock-port"),
+    ("安装包", "ensure_server 把端口传给 server.py", r'"--music-port", str\(MUSIC_PORT\)'),
+    ("安装包", "server.py 支持 --music-port", r'"--music-port"'),
+    # ---- Claude Code（与 codex 同构）----
+    ("Claude", "★与 codex 同构的两个内置档案", r"def _claude_defaults"),
+    ("Claude", "claude-node（node 适配器）", r'"claude-node"'),
+    ("Claude", "claude-client（本机客户端）", r'"claude-client"'),
+    ("Claude", "★检测 claude / claude-code-acp / 本地适配器", r'"claudeAdapter"'),
+    ("Claude", "适配器入口查找（通用 _adapter_entry）", r"def _adapter_entry"),
+    ("Claude", "★依赖判定：无登录态时提示（适配器自带 CLI，不误报缺 CLI）", r"Claude Code 登录（或 ANTHROPIC_API_KEY）"),
+    ("Claude", "claude-client 才要求 CLI/适配器", r"claude-code-acp / Claude Code CLI"),
+    ("Claude", "登录态探测（~/.claude 或 ANTHROPIC_API_KEY）", r"def _has_claude_auth"),
+    ("Claude", "★包内 agents 目录也算探测位置（安装版状态才正确）", r'os\.path\.join\(ROOT_DIR, "agents", "node"'),
+    ("Claude", "★provider 关键词整词命中（路径名不误导）", r"def _kw_hit"),
+    ("Claude", "命令只看文件名（绝对路径的目录名不算线索）", r"os\.path\.basename\(sx\)"),
+    ("安装包", "★save_registry 留一份 .bak（误写可捞）", r'AGENTS_FILE \+ "\.bak"'),
+    ("安装包", "★autofill 支持 save=False（探针别写盘）", r"def autofill\(reg: dict = None, save: bool = True\)"),
+    ("Claude", "autofill 把 npx 升级成本地适配器", r'"@zed-industries/claude-code-acp"'),
+    ("Claude", "候选扫描含 Claude Code 两类", r"Claude Code · 本机客户端"),
+    ("Claude", "★便携 node 定点查找（大目录会吃光 _walk_find 上限）", r"def _glob_node_exe"),
+    ("Claude", "按要求不探测 VS Code 缓存", r"NOT:agent-host"),
+    ("Claude", "provider 由推断而来（claude → anthropic 线索）", r'"claude", "ANTHROPIC_API_KEY"'),
+    ("安装包", "★初始化不写任何密钥", r"API Key 不随包"),
+    ("安装包", "随包 agent 用 app 相对路径", r'"agents", "node", "node\.exe"'),
+    ("安装包", "自检脚本（装完能跑）", r"opencode-ui 自检"),
+    ("安装包", "自检也检查 Claude 适配器 + 登录态", r"Claude 登录态"),
+    ("安装包", "★自检把「ACP server 超时」当正常（它会等 stdin）", r"except subprocess\.TimeoutExpired"),
+    # ---- 模型 API Key（装完怎么填）----
+    ("API Key", "★基线环境变量写入（密钥只落本机）", r"def update_baseline_env"),
+    ("API Key", "★回给界面的只有掩码", r"def mask_secret"),
+    ("API Key", "改 Key 后重启 ACP 子进程", r"def set_baseline_env"),
+    ("API Key", "基线视图（掩码 + 变量名）", r"def baseline_view"),
+    ("API Key", "接口 /engine/acp/baseline", r'"/engine/acp/baseline"'),
+    # ---- 自定义外观（头像 / 空会话素材）----
+    ("外观", "★素材状态文件（只记本机路径）", r"APPEARANCE_FILE"),
+    ("外观", "允许的图片扩展名白名单", r"IMAGE_EXTS"),
+    ("外观", "★接口 /appearance（读/写/清除）", r'path == "/appearance"'),
+    ("外观", "素材走 /appearance/img 代理（file:// 会被浏览器拦）", r'path == "/appearance/img"'),
+    ("外观", "原生选图框脚本", r"pick_image\.ps1"),
+    ("外观", "选图走共用 _pick_path（BOM 要剥掉）", r'lstrip\("\\ufeff"\)'),
+    # ---- 引擎：opencode 回归（安装版曾把 opencode 判成未就绪）----
+    ("引擎", "★多候选找 service.json（缺 USERPROFILE 也能找到）", r"def service_states"),
+    ("引擎", "用户目录多线索推导", r"def _home_dirs"),
+    ("引擎", "★装了 CLI 也算可用（不把用户挡在门外）", r"def cli_path"),
+    ("引擎", "NOT:写死 expanduser 当唯一来源",
+     r"NOT:SERVICE_STATE = os\.path\.join\(os\.path\.expanduser"),
+    ("引擎", "★自愈：注册表缺 opencode-acp 就自动补", r"def ensure_opencode_agent"),
+    ("引擎", "★server.py 每次启动都调一次自愈", r"acp_agents\.ensure_opencode_agent\(\)"),
+    ("引擎", "自愈加进来的 agent 标成内置（不给删）", r'a\["builtin"\] = True'),
+    ("安装包", "★init_state 用后端探测器找 opencode-acp", r"ag\.find_subcommand_acp\(\)"),
+]
+
 
 
 def _hit(pattern: str, text: str) -> bool:
@@ -284,11 +500,38 @@ def main() -> int:
     css = re.sub(r"/\*.*?\*/", " ",
                  io.open(os.path.join(HERE, "frontend", "style.css"), encoding="utf-8").read(), flags=re.S)
 
+    # ACP 后端也纳入体检（以前只看前端，后端改坏了没有任何网）
+    py = []
+    py_files = [os.path.join("backend", "engines", "acp", n)
+                for n in ("map_events.py", "service.py", "engine.py", "process.py",
+                          "client.py", "agents.py")]
+    py_files += [os.path.join("backend", "engines", "__init__.py"),
+                 os.path.join("backend", "engines", "opencode.py"),
+                 os.path.join("backend", "server.py"),
+                 os.path.join("backend", "watch.py"),
+                 os.path.join("backend", "panel_port.py"),
+                 os.path.join("launchers", "launch_opencode.py"),
+                 os.path.join("packaging", "build.py"),
+                 os.path.join("packaging", "init_state.py"),
+                 os.path.join("tools", "selftest.py")]
+    for rel in py_files:
+        p = os.path.join(HERE, rel)
+        src = io.open(p, encoding="utf-8").read()
+        src = re.sub(r'"""(?:.|\n)*?"""', " ", src)       # 去掉文档字符串
+        src = re.sub(r"(?m)^\s*#.*$", " ", src)           # 去掉整行注释
+        py.append("/* %s */\n%s" % (rel.replace("\\", "/"), src))
+    py = "\n".join(py)
+    # Inno 脚本单独扫（它的注释是 `;`，用 # 会误删 #define 行）
+    iss = io.open(os.path.join(HERE, "packaging", "opencode-ui.iss"), encoding="utf-8").read()
+    iss = re.sub(r"(?m)^\s*;.*$", " ", iss)
+
     fails: list = []
     total = 0
     for suffix, checks, text in (("", CHECKS, js),
                                 (" · index.html", HTML_CHECKS, html),
-                                (" · style.css", CSS_CHECKS, css)):
+                                (" · style.css", CSS_CHECKS, css),
+                                 (" · acp", PY_CHECKS, py),
+                                 (" · iss", ISS_CHECKS, iss)):
         group = None
         for g, name, pattern in checks:
             if g != group:

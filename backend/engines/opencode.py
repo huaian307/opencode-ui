@@ -3,23 +3,108 @@
 
 这里是从 server.py 原样搬过来的逻辑（read_service / /api/* 流式反代 /
 /healthz 上游探测），搬运过程中不改任何行为，保证默认引擎下表现一致。
+
+⚠ 「上哪儿找 service.json」以前写死 `os.path.expanduser("~")` —— 而安装器 / 守护进程
+   拉起的进程里 USERPROFILE / HOMEDRIVE / HOMEPATH / HOME **可能全都没有**，那时
+   expanduser 会返回字面量 `'~'` → 路径成 `~\\.local\\...` → **OpenCode 明明装了、
+   引擎却永远"未就绪"**（2026-09-26 用户实测：安装版面板里 opencode 一直灰着，就是这个）。
+   现在按"多个候选 + 谁存在用谁"来找，见 `_home_dirs()` / `service_states()`。
 """
 from __future__ import annotations
 
 import base64
 import json
 import os
+import shutil
 import urllib.error
 import urllib.request
 
 from .base import Engine, HOP_BY_HOP
 
-SERVICE_STATE = os.path.join(os.path.expanduser("~"), ".local", "state", "opencode", "service.json")
+SERVICE_REL = os.path.join(".local", "state", "opencode", "service.json")
 
 
-def read_service():
-    """读取 OpenCode 后台服务的地址与密码。"""
-    with open(SERVICE_STATE, "r", encoding="utf-8") as fh:
+def _home_dirs() -> list:
+    """所有可能的用户目录（存在、去重、顺序稳定）。
+
+    ⚠ 只用 `expanduser("~")` 不够：缺 USERPROFILE/HOME 时它会回字面量 `'~'`（实测）。
+      所以把能想到的线索都用上：USERPROFILE / HOMEDRIVE+HOMEPATH / HOME /
+      LOCALAPPDATA 去掉 `AppData\\Local` / expanduser（只在不是 `'~'` 时才认）。
+    """
+    cands = []
+    for k in ("USERPROFILE", "HOME"):
+        v = os.environ.get(k)
+        if v:
+            cands.append(v)
+    hd, hp = os.environ.get("HOMEDRIVE"), os.environ.get("HOMEPATH")
+    if hd and hp:
+        cands.append(hd.rstrip("\\/") + hp)
+    la = os.environ.get("LOCALAPPDATA") or ""
+    tail = os.path.join("AppData", "Local")
+    if la.lower().endswith(tail.lower()):
+        cands.append(la[: -len(tail)].rstrip("\\/"))
+    try:
+        exp = os.path.expanduser("~")
+        if exp and exp != "~":
+            cands.append(exp)
+    except Exception:  # noqa: BLE001
+        pass
+    seen, out = set(), []
+    for p in cands:
+        try:
+            p = os.path.normpath(str(p))
+        except Exception:  # noqa: BLE001
+            continue
+        key = p.lower()
+        if p and key not in seen and os.path.isdir(p):
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def service_states() -> list:
+    """候选的 service.json 路径（`OPENCODE_SERVICE_JSON` 环境变量可覆盖，联调/测试用）。"""
+    env = os.environ.get("OPENCODE_SERVICE_JSON", "").strip()
+    out = [env] if env else []
+    out += [os.path.join(h, SERVICE_REL) for h in _home_dirs()]
+    seen, uniq = set(), []
+    for p in out:
+        k = str(p).lower()
+        if p and k not in seen:
+            seen.add(k)
+            uniq.append(str(p))
+    return uniq
+
+
+def service_state_path() -> str:
+    """当前**真的存在**的那个 service.json（都没有就回空）。"""
+    for p in service_states():
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+def cli_path() -> str:
+    """本机 OpenCode 的 opencode-cli.exe —— 装了它就该能选出 opencode 引擎。"""
+    cands = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "@opencodedesktop",
+                     "resources", "opencode-cli.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "@opencodedesktop", "resources",
+                     "opencode-cli.exe"),
+    ]
+    for p in cands:
+        if p and os.path.isfile(p):
+            return os.path.realpath(p)
+    w = shutil.which("opencode-cli") or shutil.which("opencode")
+    return os.path.realpath(w) if w else ""
+
+
+def read_service(path: str = None):
+    """读取 OpenCode 后台服务的地址与密码（默认取当前存在的那个 service.json）。"""
+    target = path or service_state_path()
+    if not target:
+        raise FileNotFoundError("找不到 OpenCode 的 service.json（OpenCode 还没跑过？）")
+    with open(target, "r", encoding="utf-8") as fh:
         svc = json.load(fh)
     url = str(svc["url"]).rstrip("/")
     pw = svc.get("password")
@@ -30,12 +115,21 @@ def read_service():
 class OpenCodeEngine(Engine):
     id = "opencode"
     label = "OpenCode"
-    service_state = SERVICE_STATE
+
+    @property
+    def service_state(self) -> str:
+        """（server.py 启动自检里会打印它）当前用的 service.json 路径。"""
+        return service_state_path() or (service_states() or [""])[0]
 
     # ---- 生命周期 ----
 
     def available(self) -> bool:
-        return os.path.isfile(SERVICE_STATE)
+        """能不能用：有 service.json 就直接能用；只有装好的 CLI 也算"可用"。
+
+        为什么把"装了 CLI 但没跑过"也算可用：否则面板会把 opencode 引擎标成「未就绪」
+        并禁选（用户实测的困惑点）。真选它时启动器会把 OpenCode 拉起来。
+        """
+        return bool(service_state_path() or cli_path())
 
     def read_service(self):
         return read_service()
