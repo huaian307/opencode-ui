@@ -15,22 +15,31 @@
 
 ## 安装包（推荐给别人的机器）
 
+> **平台：Windows 10 / 11 · 64 位（x64）** —— 安装包自带嵌入式 Python 3.12 x64 与随包 agent，
+> **不需要**目标机预装 Python/Node；面板窗口用系统自带的 **Edge**（`--app` 独立窗口）。
+> 目前**只发布 Windows x64 一份**，没有 macOS / Linux 版本。
+
+**现成的安装包**：见 [Releases](https://github.com/huaian307/opencode-ui/releases)（资产名形如
+`opencode-ui-setup-<版本>-windows-x64.exe`）。或自己编一份：
+
 ```bat
 python packaging\build.py            :: 产出 dist\opencode-ui-setup-<版本>.exe
 ```
 
 - **核心必装**：面板 + 后端 + 嵌入式 Python（不用系统装 Python）。
-- **随包 agent（默认勾）**：Codex 适配器 + node，装完就有可用的 ACP agent。
+- **随包 agent（默认勾）**：Codex 适配器 + Claude Code 适配器（**不含 Claude 本体**）+ node，装完就有可用的 ACP agent。
 - **可选组件（默认不勾）**：音乐服务（网易云/QQ 搜歌放歌）、音频频谱 —— 不装则面板里相应位置
   会明确显示「未安装（可选组件）」，其余功能不受影响。
-- **不带 OpenCode、不带任何密钥**：引擎默认 `acp`（面板独立运行）。
+- **不带 OpenCode、不带任何密钥**：引擎默认 `acp`（面板独立运行）；装了 OpenCode 的机器上
+  「设置 → 对话引擎」里也能切到 `opencode`，agentlist 里会自动出现 `opencode-acp`。
 - **模型 API Key 由你自己给**（三条路任选）：
   ① 首次设置向导里的「模型 API Key」直接粘；② 设置 → **模型 API Key**（值留空 = 清除，界面只显示掩码）；
   ③ 设系统环境变量，例如 `DEEPSEEK_API_KEY`。没填时 agent 会明确回
   `Missing environment variable: DEEPSEEK_API_KEY.`
 - 换 provider：改 `<安装目录>\agents\codex\codex-home\config.toml` 的
   `model` / `base_url` / `env_key` 三行即可。
-- 装到 `%LOCALAPPDATA%\Programs\opencode-ui`，开始菜单有「打开面板 / 自检 / 卸载」。
+- 装到 `%LOCALAPPDATA%\Programs\opencode-ui`（**per-user，不弹 UAC**），开始菜单有「打开面板 / 自检 / 卸载」；
+  「设置 → 应用 → 已安装的应用」里也能看到并卸载。
 
 ## 1. 它是什么 / 为什么
 
